@@ -3,7 +3,7 @@
 ## One-line promise
 **Deterministic invariant checks against declared rules — PASS or FAIL with violated invariant IDs.**
 
-Two modes: **single-artifact** (JSON rules against one dataset) and **cross-artifact** (SQL constraints across multiple files via embedded DuckDB).
+Three modes: **single-artifact** (JSON rules against one dataset), **cross-artifact** (SQL constraints across multiple files via embedded DuckDB), and **infer** (discover invariants from data and emit them as a standard rules file).
 
 ---
 
@@ -16,6 +16,8 @@ Finance teams need to validate data before acting on it:
 - Do cross-file relationships hold? (tenant areas sum to property total, every escalation references a real tenant)
 
 Today this is ad-hoc scripts, manual spot-checks, or nothing. `verify` replaces that with declared, versioned, deterministic rules that produce auditable evidence.
+
+Worse: even teams that want rules don't write them. The activation energy is too high. `verify infer` solves the cold-start problem — hand it a known-good dataset and it discovers the invariants for you.
 
 ---
 
@@ -298,7 +300,169 @@ verify cross lease_abstract.v1.sql \
   --bind escalations=newmark_escalations.csv \
   --lock newmark.lock.json \
   --json
+
+# Discover rules from a known-good dataset
+verify infer tape.csv --key loan_id --json > rules.json
+
+# Discover temporal rules from 3 months of data
+verify infer jan.csv feb.csv mar.csv --key loan_id --json > rules.json
+
+# Full workflow: infer -> verify -> pack
+verify infer good_tape.csv --key loan_id --json > rules.json
+verify new_tape.csv --rules rules.json --key loan_id --json > verify.report.json
+pack seal verify.report.json rules.json --note "Inferred contract check" --output evidence/
 ```
+
+---
+
+## Contract discovery (`verify infer`)
+
+The fundamental problem with data validation is that nobody writes the rules. The activation energy to go from "no validation" to "declared rules" is enormous. `verify infer` eliminates that barrier: hand it a known-good dataset, and it emits the invariants the data currently satisfies as a standard `verify.rules.v0` JSON file.
+
+The same tool that *checks* invariants also *discovers* them.
+
+### CLI
+
+```
+verify infer <DATASET>... [OPTIONS]
+
+Arguments:
+  <DATASET>...           One or more CSV files to infer rules from
+
+Options:
+  --key <COLUMN>         Key column (infers uniqueness/not_null for this column)
+  --include-measured     Also emit measured rules (row_count, sum) — see rule classification below
+  --json                 JSON output (default: the rules file itself)
+```
+
+### Exit codes
+
+`0` rules inferred | `2` refusal
+
+`verify infer` always exits `0` on success — there is no pass/fail. The output is a rules file, not a report.
+
+### Structural vs measured rules
+
+From a single file, some inferred properties are **structural** (true of all valid files of this type) and some are **measured** (true of this particular instance). A single file cannot distinguish between the two. `verify infer` handles this by classifying rule types:
+
+| Classification | Rule types | Single-file behavior | Multi-file behavior |
+|---|---|---|---|
+| **Structural** | `unique`, `not_null`, `domain` (with `in`) | Always emitted | Emitted if true in ALL files |
+| **Measured** | `row_count`, `sum`, `domain` (with `gt`/`lt` from observed bounds) | Only with `--include-measured` | Emitted with tolerance derived from observed range |
+
+The default (no flag) emits only structural rules. This is the honest answer: from one file, you can discover what the data promises about its own shape. You cannot discover what it promises about its behavior over time.
+
+### Single-file inference
+
+Given one dataset, `verify infer` performs a single pass and discovers:
+
+| What it checks | Rule emitted | Classification |
+|---|---|---|
+| Column has zero nulls | `not_null` | structural |
+| Column has all unique values | `unique` | structural |
+| All values in a column belong to a small finite set (≤ 20 distinct values relative to row count) | `domain` with `in: [...]` | structural |
+| `--key` column specified | `unique` + `not_null` for that column | structural |
+| All numeric values are positive | `domain` with `gt: 0` | structural |
+| Row count | `row_count` | measured |
+| Numeric column total | `sum` | measured |
+
+**Rule ID generation:** Inferred rules get deterministic IDs: `INFERRED_<TYPE>_<COLUMN>` (e.g., `INFERRED_UNIQUE_loan_id`, `INFERRED_NOT_NULL_balance`). Deterministic naming means the same dataset always produces the same rule IDs.
+
+**Output (single file):**
+
+```bash
+verify infer tape.csv --key loan_id --json > rules.json
+```
+
+```json
+{
+  "version": "verify.rules.v0",
+  "rules": [
+    { "id": "INFERRED_UNIQUE_loan_id", "type": "unique", "column": "loan_id" },
+    { "id": "INFERRED_NOT_NULL_loan_id", "type": "not_null", "column": "loan_id" },
+    { "id": "INFERRED_NOT_NULL_balance", "type": "not_null", "column": "balance" },
+    { "id": "INFERRED_NOT_NULL_status", "type": "not_null", "column": "status" },
+    { "id": "INFERRED_DOMAIN_status", "type": "domain", "column": "status", "constraint": { "in": ["current", "delinquent", "default"] } },
+    { "id": "INFERRED_DOMAIN_balance_positive", "type": "domain", "column": "balance", "constraint": { "gt": 0 } }
+  ],
+  "inferred_from": {
+    "files": ["tape.csv"],
+    "file_hashes": ["sha256:abc123..."],
+    "mode": "structural"
+  }
+}
+```
+
+The output is a standard rules file. Edit it, tighten it, and use it:
+
+```bash
+# Infer from known-good data
+verify infer tape.csv --key loan_id --json > rules.json
+
+# Review and edit (remove false positives, adjust constraints)
+# ...
+
+# Enforce on next delivery
+verify new_tape.csv --rules rules.json --json
+```
+
+### Multi-file inference
+
+Given N datasets, `verify infer` discovers **temporal invariants** — rules that hold across all files. Measured rules become legitimate because they're derived from observed ranges, not single snapshots.
+
+```bash
+verify infer jan.csv feb.csv mar.csv --key loan_id --json > rules.json
+```
+
+**Multi-file logic:**
+
+| Property | Behavior |
+|---|---|
+| Structural rule holds in ALL files | Emitted |
+| Structural rule fails in ANY file | Not emitted |
+| `row_count` across N files | Emitted with `expected` = mean, `tolerance` = max observed deviation |
+| `sum` across N files | Emitted with `expected` = mean, `tolerance` = max observed deviation |
+| `domain` with `in` | Union of observed values across all files |
+| `domain` numeric bounds | `gt`/`lt` from the widest observed range |
+
+**Output (multi-file):**
+
+```json
+{
+  "version": "verify.rules.v0",
+  "rules": [
+    { "id": "INFERRED_UNIQUE_loan_id", "type": "unique", "column": "loan_id" },
+    { "id": "INFERRED_NOT_NULL_balance", "type": "not_null", "column": "balance" },
+    { "id": "INFERRED_DOMAIN_status", "type": "domain", "column": "status", "constraint": { "in": ["current", "delinquent", "default", "prepaid"] } },
+    { "id": "INFERRED_ROW_COUNT", "type": "row_count", "expected": 4193, "tolerance": 15 },
+    { "id": "INFERRED_SUM_balance", "type": "sum", "column": "balance", "expected": 1500000000.00, "tolerance": 30000000.00 }
+  ],
+  "inferred_from": {
+    "files": ["jan.csv", "feb.csv", "mar.csv"],
+    "file_hashes": ["sha256:aaa...", "sha256:bbb...", "sha256:ccc..."],
+    "mode": "temporal"
+  }
+}
+```
+
+Note: `status` domain is the union (`prepaid` appeared in one month). `row_count` tolerance is 15 (observed range: 4178-4208). `sum` tolerance is 30M (observed range: 1.47B-1.53B). `--include-measured` is implicit in multi-file mode — the whole point of N files is to make measured rules legitimate.
+
+### Refusal codes (infer)
+
+| Code | Trigger | Next step |
+|------|---------|-----------|
+| `E_IO` | Can't read dataset | Check path |
+| `E_CSV_PARSE` | Can't parse dataset | Check format |
+| `E_EMPTY` | Dataset has zero rows | Provide a non-empty dataset |
+| `E_NO_COMMON_COLUMNS` | Multi-file: files share no column names | Check that files are the same type |
+
+### Why this matters
+
+1. **Zero activation energy.** Go from "no validation" to "full rule set" in one command. No JSON authoring, no documentation spelunking.
+2. **Agent-native.** An agent can `verify infer` on a known-good dataset, store the rules in a `pack`, and enforce them on every subsequent delivery — without a human writing a single rule.
+3. **Flywheel.** One file gives you structural contracts. Three files give you temporal contracts. Twelve files give you high-confidence contracts with tight tolerances. The rules get better with every dataset you feed it.
+4. **No new format.** The output is `verify.rules.v0` — the same JSON that `verify` already consumes. It feeds `assess`, lands in `pack`, composes with `--lock`. The protocol just works.
+5. **Deterministic.** Same data always infers the same rules. Not ML, not probabilistic. Single-pass, ~200 LOC.
 
 ---
 
