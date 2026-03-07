@@ -7,10 +7,14 @@ The repository's current implementation-direction plan is
 `docs/plan.md` for repo structure, protocol boundaries, and factory/tournament
 role definition.
 
+In particular: `verify cross` in this document is historical framing, not a
+separate product boundary. The current plan treats cross-artifact validation as
+the multi-binding / arity-N case of one `verify` primitive.
+
 ## One-line promise
 **Deterministic invariant checks against declared rules — PASS or FAIL with violated invariant IDs.**
 
-Three modes: **single-artifact** (JSON rules against one dataset), **cross-artifact** (SQL constraints across multiple files via embedded DuckDB), and **infer** (discover invariants from data and emit them as a standard rules file).
+Three modes: **single-artifact** (JSON rules against one dataset), **multi-binding** (historically called `verify cross`, using SQL constraints across multiple files via embedded DuckDB), and **infer** (discover invariants from data and emit them as a standard rules file).
 
 ---
 
