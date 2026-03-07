@@ -1,5 +1,12 @@
 # verify — Invariant Checks
 
+This document preserves the earlier feature-oriented framing of `verify`.
+
+The repository's current implementation-direction plan is
+`docs/plan.md`. Where this file and `docs/plan.md` disagree, prefer
+`docs/plan.md` for repo structure, protocol boundaries, and factory/tournament
+role definition.
+
 ## One-line promise
 **Deterministic invariant checks against declared rules — PASS or FAIL with violated invariant IDs.**
 
