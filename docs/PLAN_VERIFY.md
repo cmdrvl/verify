@@ -150,9 +150,9 @@ Rules files don't need profiles' draft/frozen lifecycle. They're just JSON. Hash
 
 ---
 
-## Cross-artifact mode (`verify cross`)
+## Multi-binding mode (historical `verify cross` alias)
 
-Cross-artifact constraint validation using SQL via embedded DuckDB. Validates relationships, aggregations, and business rules that span multiple files — constraints that single-artifact mode cannot express.
+Cross-artifact constraint validation is the arity-N case of `verify`: one primitive, multiple named bindings. It validates relationships, aggregations, and business rules that span multiple files — constraints that single-artifact mode cannot express.
 
 ### Why SQL
 
@@ -161,10 +161,10 @@ Cross-artifact constraints are naturally relational — foreign keys, aggregatio
 ### CLI
 
 ```
-verify cross <CONSTRAINTS> [OPTIONS]
+verify run <CONSTRAINTS> [OPTIONS]
 
 Arguments:
-  <CONSTRAINTS>          SQL constraint file (.sql)
+  <CONSTRAINTS>          Constraint artifact / query-backed constraint file
 
 Options:
   --bind <NAME=PATH>     Bind a logical table name to a physical file (repeatable)
@@ -233,7 +233,8 @@ The constraint SQL references logical names (`FROM property`, `FROM tenants`), n
 
 ```json
 {
-  "version": "verify_cross.v0",
+  "version": "verify.v0",
+  "mode": "multi_binding",
   "outcome": "FAIL",
   "constraint_file": "lease_abstract.v1.sql",
   "constraint_hash": "sha256:d4e5f6...",
@@ -265,7 +266,7 @@ The constraint SQL references logical names (`FROM property`, `FROM tenants`), n
 }
 ```
 
-### Refusal codes (cross-artifact)
+### Refusal codes (multi-binding)
 
 | Code | Trigger | Next step |
 |------|---------|-----------|
@@ -296,8 +297,8 @@ verify dec.csv --rules rules.json --json > verify.report.json \
 verify tape.csv --rules rules.json --json > verify.report.json
 pack seal verify.report.json dec.lock.json --note "Q4 validation" --output evidence/q4/
 
-# Cross-artifact validation with logical name bindings
-verify cross lease_abstract.v1.sql \
+# Multi-binding validation with logical name bindings
+verify run lease_abstract.v1.sql \
   --bind property=property.json \
   --bind tenants=tenants.jsonl \
   --bind escalations=escalations.csv \
@@ -305,7 +306,7 @@ verify cross lease_abstract.v1.sql \
   --json
 
 # Same constraint file, different formats from a different partner
-verify cross lease_abstract.v1.sql \
+verify run lease_abstract.v1.sql \
   --bind property=newmark_property.csv \
   --bind tenants=newmark_tenants.csv \
   --bind escalations=newmark_escalations.csv \
