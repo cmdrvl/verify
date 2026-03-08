@@ -323,6 +323,32 @@ Minimum shape:
 Compiled constraint artifacts are the runtime contract. They are what gets
 validated, hashed, packed, and embedded.
 
+#### Constraint top-level fields
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `version` | string | yes | Must be `verify.constraint.v1` |
+| `constraint_set_id` | string | yes | Stable logical identifier for the constraint set |
+| `bindings` | array | yes | Declared named relations required by the constraint set |
+| `rules` | array | yes | Ordered rule declarations; rule IDs must be unique |
+
+#### Binding fields
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | yes | Logical relation name used by rules |
+| `kind` | string | yes | V0 only allows `relation` |
+| `key_fields` | string[] | no | Canonical localization key for failed rows |
+
+#### Rule fields
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `id` | string | yes | Stable rule identifier, unique within the set |
+| `severity` | string | yes | `error` or `warn` |
+| `portability` | string | yes | `portable` or `batch_only` |
+| `check` | object | yes | Rule payload; shape depends on `op` |
+
 ### Authoring inputs and compile contract
 
 V0 may accept two authoring families:
@@ -365,6 +391,20 @@ Batch-only:
 relational checks without pretending those rules are automatically usable inside
 the factory runtime. If the factory needs one of those rules, it should be
 lowered into portable ops or implemented as a dedicated portable rule kind.
+
+#### Rule op contract
+
+| `op` | Portability | Required fields | Meaning |
+|------|-------------|-----------------|---------|
+| `unique` | portable | `binding`, `columns[]` | No two rows may share the same tuple across the named columns |
+| `not_null` | portable | `binding`, `columns[]` | Named columns must be present and non-null for every row |
+| `predicate` | portable | `binding`, `expr` | Row-level boolean expression must evaluate true for every row |
+| `row_count` | portable | `binding`, `compare` | Relation row count must satisfy the declared comparison |
+| `aggregate_compare` | portable | `binding`, `aggregate`, `compare` | Aggregate over one binding must satisfy the declared comparison |
+| `foreign_key` | portable | `binding`, `columns[]`, `ref_binding`, `ref_columns[]` | Referencing rows must resolve against the referenced relation key |
+| `query_zero_rows` | batch_only | `bindings[]`, `query` | Query returns violating rows; zero rows means PASS |
+
+Portable op semantics must be executable without DuckDB-specific query text.
 
 ### Binding contract
 
@@ -468,6 +508,50 @@ Minimum shape:
   "refusal": null
 }
 ```
+
+#### Report top-level fields
+
+| Field | Type | Nullable | Notes |
+|-------|------|----------|-------|
+| `tool` | string | no | Must be `verify` |
+| `version` | string | no | Must be `verify.report.v1` |
+| `execution_mode` | string | no | `batch` or `embedded` |
+| `outcome` | string | no | `PASS`, `FAIL`, or `REFUSAL` |
+| `constraint_set_id` | string | no | Logical identifier of the applied constraint set |
+| `constraint_hash` | string | no | Content hash of the compiled constraint artifact |
+| `bindings` | object | no | Binding identities keyed by binding name |
+| `summary` | object | no | Aggregate rule counts |
+| `policy_signals` | object | no | Narrow discrete signals for downstream policy |
+| `results` | array | no | One result entry per rule |
+| `refusal` | object | yes | Populated only for `REFUSAL` |
+
+#### Binding report fields
+
+| Field | Type | Nullable | Notes |
+|-------|------|----------|-------|
+| `kind` | string | no | V0 only allows `relation` |
+| `source` | string | no | Path-like label in batch; stable executor label in embedded |
+| `content_hash` | string | no | Content hash of the bound relation input |
+| `input_verification` | object | yes | Present when `--lock` verification was requested |
+
+#### Rule result fields
+
+| Field | Type | Nullable | Notes |
+|-------|------|----------|-------|
+| `rule_id` | string | no | Stable rule identifier |
+| `severity` | string | no | `error` or `warn` |
+| `status` | string | no | `pass` or `fail` |
+| `violation_count` | integer | no | `0` for PASS, `>0` for FAIL |
+| `affected` | array | no | Localized failure details; empty for PASS |
+
+#### Affected-entry fields
+
+| Field | Type | Nullable | Notes |
+|-------|------|----------|-------|
+| `binding` | string | no | Binding name implicated by the failure |
+| `key` | object | yes | Key tuple when the binding exposes `key_fields` |
+| `field` | string | yes | Field/column implicated by the failure |
+| `value` | any | yes | Observed value that caused the failure |
 
 ### Required report properties
 
@@ -590,6 +674,9 @@ The arity-1 shortcut should support:
 - `--key <COLUMN>` optional convenience for arity-1 inputs; it supplies
   `bindings[0].key_fields = [<COLUMN>]` during the compile+run shortcut when the
   authoring source does not already declare key fields
+- if the authoring source already declares `key_fields` for the single `input`
+  binding, a conflicting `--key` must refuse rather than silently override the
+  compiled contract
 - the same `--lock`, `--max-rows`, `--max-bytes`, `--json`, `--no-witness`,
   `--describe`, `--schema`, and `--version` flags
 
@@ -608,6 +695,7 @@ The arity-1 shortcut should support:
 ```text
 verify compile <SOURCE> --out <CONSTRAINTS>
 verify compile <SOURCE> --check
+verify compile --schema
 ```
 
 Authoring inputs may include:
@@ -620,6 +708,9 @@ raw authoring files to silently double as the runtime contract forever.
 
 `verify compile --check` validates authoring inputs and the compiled
 `verify.constraint.v1` output shape without writing an artifact.
+
+`verify compile --schema` should print the compiled constraint schema
+(`verify.constraint.v1.schema.json`).
 
 ### Validation and discovery
 
@@ -727,23 +818,25 @@ A self-consistent answer can still be wrong.
   execution must be provided exactly once by the executor.
 - `I04` Binding key invariant: when a binding declares `key_fields`, those fields
   are the canonical row-localization surface for that binding's failed results.
-- `I05` Rule identity invariant: rule IDs are unique within a constraint set.
-- `I06` Portability invariant: `portable` rules cannot depend on batch-only
+- `I05` Shortcut-key invariant: the arity-1 shortcut may supply `key_fields`
+  only when the authored contract does not already declare a conflicting key.
+- `I06` Rule identity invariant: rule IDs are unique within a constraint set.
+- `I07` Portability invariant: `portable` rules cannot depend on batch-only
   query execution semantics.
-- `I07` Embedded refusal invariant: embedded execution refuses any batch-only
+- `I08` Embedded refusal invariant: embedded execution refuses any batch-only
   rule that has not been lowered explicitly.
-- `I08` Localization invariant: every failing rule result carries
+- `I09` Localization invariant: every failing rule result carries
   `violation_count`, and failure details localize to affected bindings plus keys
   and fields when available.
-- `I09` Summary invariant: `total_rules = passed_rules + failed_rules`.
-- `I10` Rule-result invariant: every rule emits exactly one result entry, and
+- `I10` Summary invariant: `total_rules = passed_rules + failed_rules`.
+- `I11` Rule-result invariant: every rule emits exactly one result entry, and
   PASS results always carry `violation_count = 0`.
-- `I11` Policy-band invariant: `severity_band` is derived from failing rule
+- `I12` Policy-band invariant: `severity_band` is derived from failing rule
   severities only and has exactly three values: `CLEAN`, `WARN_ONLY`,
   `ERROR_PRESENT`.
-- `I12` Input integrity invariant: when `--lock` is provided, all referenced
+- `I13` Input integrity invariant: when `--lock` is provided, all referenced
   bound inputs must verify before rule evaluation proceeds.
-- `I13` Determinism invariant: same compiled constraint bytes and same bound
+- `I14` Determinism invariant: same compiled constraint bytes and same bound
   relation contents produce the same ordered report bytes.
 
 ## Refusal codes
@@ -768,6 +861,7 @@ refusal codes:
 | `VerifyError::BadExpression` | `E_BAD_EXPR` | Invalid predicate or aggregate compare expression |
 | `VerifyError::SqlExecution` | `E_SQL_ERROR` | `query_zero_rows` failed in DuckDB |
 | `VerifyError::EmbeddedUnsupported` | `E_BATCH_ONLY_RULE` | Batch-only rule used in embedded execution |
+| `VerifyError::KeyOverrideConflict` | `E_KEY_CONFLICT` | Shortcut `--key` conflicts with authored `key_fields` |
 | `VerifyError::InputNotLocked` | `E_INPUT_NOT_LOCKED` | Bound input missing from provided locks |
 | `VerifyError::InputDrift` | `E_INPUT_DRIFT` | Bound input hash differs from lock member |
 | `VerifyError::TooLarge` | `E_TOO_LARGE` | Bound input exceeds `--max-rows` or `--max-bytes` |
@@ -787,9 +881,89 @@ refusal codes:
 | `E_BAD_EXPR` | Predicate or aggregate expression is invalid | Fix the rule expression |
 | `E_SQL_ERROR` | `query_zero_rows` failed during batch execution | Fix the query-backed rule |
 | `E_BATCH_ONLY_RULE` | Embedded execution received a batch-only rule | Lower the rule or run in batch mode |
+| `E_KEY_CONFLICT` | Shortcut `--key` disagrees with authored `key_fields` | Remove the CLI override or fix the authored binding key |
 | `E_INPUT_NOT_LOCKED` | Bound input not present in any provided lockfile | Lock the input or provide the correct lock |
 | `E_INPUT_DRIFT` | Bound input hash differs from the lock member | Use the locked artifact or regenerate the lock intentionally |
 | `E_TOO_LARGE` | A bound input exceeds the configured size limit | Increase the limit or split the input |
+
+### Refusal JSON envelope
+
+```json
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "REFUSAL",
+  "constraint_set_id": "loan_tape.monthly.v1",
+  "constraint_hash": "sha256:...",
+  "bindings": {},
+  "summary": {
+    "total_rules": 0,
+    "passed_rules": 0,
+    "failed_rules": 0,
+    "by_severity": {
+      "error": 0,
+      "warn": 0
+    }
+  },
+  "policy_signals": {
+    "severity_band": "CLEAN"
+  },
+  "results": [],
+  "refusal": {
+    "code": "E_FIELD_NOT_FOUND",
+    "message": "Rule POSITIVE_BALANCE references field balance, which is not present in binding input",
+    "detail": {
+      "rule_id": "POSITIVE_BALANCE",
+      "binding": "input",
+      "field": "balance"
+    },
+    "next_step": "Fix the constraint set or bind an input that exposes the required field."
+  }
+}
+```
+
+### Refusal detail schemas
+
+```text
+E_DUPLICATE_BINDING:
+  { "binding": "input" }
+
+E_MISSING_BINDING:
+  { "binding": "tenants" }
+
+E_UNDECLARED_BINDING:
+  { "binding": "options" }
+
+E_FIELD_NOT_FOUND:
+  { "rule_id": "POSITIVE_BALANCE", "binding": "input", "field": "balance" }
+
+E_KEY_CONFLICT:
+  {
+    "binding": "input",
+    "authored_key_fields": ["loan_identifier"],
+    "cli_key_field": "loan_id"
+  }
+
+E_INPUT_NOT_LOCKED:
+  { "binding": "input", "path": "tape.csv", "locks_checked": ["dec.lock.json"] }
+
+E_INPUT_DRIFT:
+  {
+    "binding": "input",
+    "path": "tape.csv",
+    "expected_hash": "sha256:...",
+    "observed_hash": "sha256:..."
+  }
+
+E_TOO_LARGE:
+  {
+    "binding": "input",
+    "limit_kind": "max_rows | max_bytes",
+    "limit": 1000000,
+    "observed": 1250344
+  }
+```
 
 ## Test matrix
 
@@ -797,6 +971,8 @@ Named test suites should exist before calling v0 complete:
 
 - `schema_contract` — compiled artifact and report schemas round-trip and reject
   invalid fixtures
+- `compile_contract` — JSON/YAML and SQL authoring inputs compile deterministically
+  into `verify.constraint.v1`, including `--check` and `compile --schema`
 - `portable_rules` — `unique`, `not_null`, `predicate`, `row_count`,
   `aggregate_compare`, and `foreign_key`
 - `query_rules` — `query_zero_rows` happy path, failing path, and SQL refusal
@@ -806,6 +982,8 @@ Named test suites should exist before calling v0 complete:
 - `lock_integration` — `--lock` success, `E_INPUT_NOT_LOCKED`, and
   `E_INPUT_DRIFT`
 - `cli` — human mode, `--json`, arity-1 shortcut, and exit code mapping
+- `cli_key_conflict` — conflicting authored `key_fields` and shortcut `--key`
+  refuse with `E_KEY_CONFLICT`
 - `embedding_equivalence` — portable rules emit identical results in batch and
   embedded execution
 - `determinism` — repeated runs keep report ordering and serialization stable
@@ -863,6 +1041,7 @@ cargo test
 - implement `verify run`
 - implement the arity-1 shortcut `verify <DATASET> --rules <SOURCE>`
 - implement `verify validate`, `--schema`, and `--describe`
+- implement shortcut conflict handling for authored `key_fields` vs `--key`
 
 ### D6. Add lock verification
 
@@ -873,6 +1052,7 @@ cargo test
 ### D7. Add compile and query-backed support
 
 - implement `verify compile` for JSON/YAML authoring
+- implement `verify compile --check` and `verify compile --schema`
 - compile SQL-backed assertions into `query_zero_rows`
 - implement `query_zero_rows` batch execution
 
