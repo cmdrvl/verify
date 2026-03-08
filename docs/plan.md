@@ -277,7 +277,7 @@ Minimum shape:
   "version": "verify.constraint.v1",
   "constraint_set_id": "loan_tape.monthly.v1",
   "bindings": [
-    { "name": "input", "kind": "relation" }
+    { "name": "input", "kind": "relation", "key_fields": ["loan_id"] }
   ],
   "rules": [
     {
@@ -337,6 +337,10 @@ compile` must normalize them into `verify.constraint.v1` so that:
 - bindings are declared before execution
 - the runtime never has to guess which semantics a source file implied
 
+For SQL-backed authoring, each named assertion compiles into one rule entry in
+`rules` with `portability = "batch_only"` and the stored query payload required
+for `query_zero_rows`.
+
 For operator ergonomics, an arity-1 CLI shortcut may still accept
 `verify <DATASET> --rules <SOURCE>`, but that path must be equivalent to
 compiling the source and then executing a compiled constraint artifact against a
@@ -367,6 +371,11 @@ lowered into portable ops or implemented as a dedicated portable rule kind.
 Bindings are named relations, not "files". Batch execution happens to satisfy
 bindings from files; embedded execution satisfies bindings from in-memory
 relations.
+
+Bindings may optionally declare `key_fields`. These are not required for rule
+evaluation, but they are the canonical localization surface for failed rows in
+reports when the relation has a stable entity key. This matters because
+localized failures are part of the protocol, not just CLI sugar.
 
 For batch execution, v0 supports:
 
@@ -476,15 +485,33 @@ For batch runs, reports must also preserve:
 - exact binding content hashes
 - lock verification status when `--lock` was used
 
+For embedded runs, `bindings.<name>.source` is an executor-supplied stable label
+rather than a filesystem path.
+
 For factory use, the report must also preserve enough structure to map a failed
 constraint back to affected entity/bucket candidates. That means `affected`
 records are part of the core contract, not an optional pretty-print detail.
+
+Every rule emits exactly one result entry.
+
+- PASS results carry `status = "pass"`, `violation_count = 0`, and
+  `affected = []`.
+- FAIL results carry `status = "fail"`, `violation_count > 0`, and one or more
+  localized `affected` entries.
+
+`summary.by_severity` counts failing rules by severity, not all declared rules.
 
 `policy_signals.severity_band` should stay narrow and discrete:
 
 - `CLEAN` — no failing rules
 - `WARN_ONLY` — one or more failures, but all failing rules are `warn`
 - `ERROR_PRESENT` — at least one failing rule is `error`
+
+Outcome semantics are exact:
+
+- `PASS` — zero failed rules
+- `FAIL` — one or more failed rules
+- `REFUSAL` — execution did not complete and `refusal` is populated
 
 ### Output (human)
 
@@ -560,7 +587,9 @@ verify tape.csv \
 The arity-1 shortcut should support:
 
 - `--rules <SOURCE>` required
-- `--key <COLUMN>` optional operator hint for arity-1 result localization
+- `--key <COLUMN>` optional convenience for arity-1 inputs; it supplies
+  `bindings[0].key_fields = [<COLUMN>]` during the compile+run shortcut when the
+  authoring source does not already declare key fields
 - the same `--lock`, `--max-rows`, `--max-bytes`, `--json`, `--no-witness`,
   `--describe`, `--schema`, and `--version` flags
 
@@ -578,6 +607,7 @@ The arity-1 shortcut should support:
 
 ```text
 verify compile <SOURCE> --out <CONSTRAINTS>
+verify compile <SOURCE> --check
 ```
 
 Authoring inputs may include:
@@ -588,6 +618,9 @@ Authoring inputs may include:
 The compile step exists to make the protocol artifact explicit. We do not want
 raw authoring files to silently double as the runtime contract forever.
 
+`verify compile --check` validates authoring inputs and the compiled
+`verify.constraint.v1` output shape without writing an artifact.
+
 ### Validation and discovery
 
 ```text
@@ -596,6 +629,13 @@ verify --schema
 verify --describe
 verify witness <query|last|count>
 ```
+
+`verify validate` validates compiled `verify.constraint.v1` artifacts only.
+Authoring sources are validated through `verify compile --check`.
+
+`verify --schema` should print the primary report schema
+(`verify.report.v1.schema.json`). The compiled constraint schema belongs on the
+compile surface because it is the output contract of `verify compile`.
 
 `verify witness` is read/query-only. It participates in the same local receipt
 log pattern as the other spine tools, but witness remains supplemental local
@@ -685,21 +725,25 @@ A self-consistent answer can still be wrong.
   declared in `bindings`.
 - `I03` Binding satisfaction invariant: every declared binding required for
   execution must be provided exactly once by the executor.
-- `I04` Rule identity invariant: rule IDs are unique within a constraint set.
-- `I05` Portability invariant: `portable` rules cannot depend on batch-only
+- `I04` Binding key invariant: when a binding declares `key_fields`, those fields
+  are the canonical row-localization surface for that binding's failed results.
+- `I05` Rule identity invariant: rule IDs are unique within a constraint set.
+- `I06` Portability invariant: `portable` rules cannot depend on batch-only
   query execution semantics.
-- `I06` Embedded refusal invariant: embedded execution refuses any batch-only
+- `I07` Embedded refusal invariant: embedded execution refuses any batch-only
   rule that has not been lowered explicitly.
-- `I07` Localization invariant: every failing rule result carries
+- `I08` Localization invariant: every failing rule result carries
   `violation_count`, and failure details localize to affected bindings plus keys
   and fields when available.
-- `I08` Summary invariant: `total_rules = passed_rules + failed_rules`.
-- `I09` Policy-band invariant: `severity_band` is derived from failing rule
+- `I09` Summary invariant: `total_rules = passed_rules + failed_rules`.
+- `I10` Rule-result invariant: every rule emits exactly one result entry, and
+  PASS results always carry `violation_count = 0`.
+- `I11` Policy-band invariant: `severity_band` is derived from failing rule
   severities only and has exactly three values: `CLEAN`, `WARN_ONLY`,
   `ERROR_PRESENT`.
-- `I10` Input integrity invariant: when `--lock` is provided, all referenced
+- `I12` Input integrity invariant: when `--lock` is provided, all referenced
   bound inputs must verify before rule evaluation proceeds.
-- `I11` Determinism invariant: same compiled constraint bytes and same bound
+- `I13` Determinism invariant: same compiled constraint bytes and same bound
   relation contents produce the same ordered report bytes.
 
 ## Refusal codes
