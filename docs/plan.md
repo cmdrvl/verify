@@ -1,10 +1,53 @@
-# verify
+# verify — Constraint Protocol
 
 This is the implementation-direction plan for the repository.
 
 `docs/PLAN_VERIFY.md` captures the earlier feature-oriented framing inherited
 from the broader spine plan. Where the two documents differ, this file should
 govern repository structure and protocol boundaries.
+
+## One-line promise
+
+**Evaluate a versioned constraint set against one or more named relations and
+emit a deterministic constraint report with localized failures.**
+
+## Decision
+
+`verify` is the epistemic spine's constraint primitive.
+
+It evaluates declared constraints. It does not select winners, score gold-set
+accuracy, or decide whether a pipeline should proceed.
+
+## Problem
+
+The spine and factory both need the same thing:
+
+- a canonical constraint artifact
+- a canonical violation/report artifact
+- deterministic evaluation semantics
+- a reusable execution engine
+
+Today that need is scattered across older single-file rule framing, SQL-backed
+cross-artifact checks, and factory-local constraint talk. `verify` exists to
+collapse those into one explicit protocol that works in both the spine and the
+factory.
+
+## V0 scope discipline
+
+V0 is intentionally narrow:
+
+- one canonical compiled constraint artifact: `verify.constraint.v1`
+- one canonical report artifact: `verify.report.v1`
+- one portable rule family plus one explicit batch-only rule family
+- one batch executor over files and one embedded executor over named relations
+
+Deferred beyond v0:
+
+- arbitrary user-defined execution backends
+- a general-purpose policy language
+- graph-shaped constraint validation
+- hosted orchestration concerns
+- rules lifecycle machinery beyond content hashing and evidence packing
 
 ## Core definition
 
@@ -21,15 +64,6 @@ This is one primitive with two execution contexts:
 
 `verify` is not a conflict resolver, not a benchmark scorer, not a policy
 engine, and not a storage system.
-
-## Why this repo exists
-
-The spine and factory both need the same thing:
-
-- a canonical constraint artifact
-- a canonical violation/report artifact
-- deterministic evaluation semantics
-- a reusable execution engine
 
 The CLI is the reference executor. The factory embeds the same protocol.
 
@@ -96,6 +130,26 @@ Those belong to:
 - `benchmark` for gold-set accuracy
 - `assess` for proceed/escalate/block decisions
 
+## Non-negotiables
+
+These are engineering contracts, not aspirations. If any are violated,
+`verify` is not `verify` yet.
+
+1. One primitive only. Arity-1 and arity-N are execution cases of the same
+   protocol, not separate products.
+2. No hidden semantics split. JSON/YAML authoring and SQL authoring compile into
+   one compiled constraint artifact family.
+3. Portable rules are truly portable. A rule marked `portable` must evaluate
+   with the same meaning in batch and embedded execution.
+4. Batch-only rules stay explicit. Embedded execution must refuse them rather
+   than silently ignoring or approximating them.
+5. Failure localization is first-class. Failed results must identify affected
+   bindings and, when available, keys and fields.
+6. Reports are deterministic. Same bindings + same compiled constraint bytes
+   produce the same ordered report bytes.
+7. `verify` never becomes a correctness scorer. Gold truth belongs to
+   `benchmark`, and policy decisions belong to `assess`.
+
 ## Non-goals
 
 `verify` will not:
@@ -106,6 +160,14 @@ Those belong to:
 - replace `benchmark`
 - store long-term lineage beyond normal witness/pack participation
 - become a general-purpose arbitrary rules engine
+
+## Tool category
+
+`verify` is a **report tool**.
+
+- default stdout: human-readable summary
+- `--json`: machine-readable full report
+- stderr: process diagnostics only, never evidence
 
 ## Repo shape
 
@@ -119,14 +181,25 @@ verify/
 │   ├── verify.constraint.v1.schema.json
 │   └── verify.report.v1.schema.json
 ├── fixtures/
+│   ├── authoring/
 │   ├── constraints/
 │   ├── inputs/
+│   ├── locks/
 │   └── reports/
 ├── crates/
 │   ├── verify-core/
 │   ├── verify-engine/
 │   ├── verify-duckdb/
 │   └── verify-cli/
+├── tests/
+│   ├── schema_contract.rs
+│   ├── portable_rules.rs
+│   ├── query_rules.rs
+│   ├── refusals.rs
+│   ├── lock_integration.rs
+│   ├── cli.rs
+│   ├── embedding_equivalence.rs
+│   └── determinism.rs
 └── Cargo.toml
 ```
 
@@ -170,11 +243,23 @@ Owns user-facing command surface:
 - `run`
 - `compile`
 - `validate`
+- `witness`
 - `--describe`
 - `--schema`
+- `--version`
 
 It should stay thin. It wires together `verify-core`, `verify-engine`, and
 `verify-duckdb`.
+
+### Dependency direction
+
+- `verify-core` -> no internal crate dependencies
+- `verify-engine` -> `verify-core`
+- `verify-duckdb` -> `verify-core`, `verify-engine`
+- `verify-cli` -> `verify-core`, `verify-engine`, `verify-duckdb`
+
+`verify-cli` should only map command inputs and exit codes. Rule semantics,
+report construction, and deterministic ordering must live below the CLI layer.
 
 ## Core artifacts
 
@@ -235,6 +320,28 @@ Minimum shape:
 }
 ```
 
+Compiled constraint artifacts are the runtime contract. They are what gets
+validated, hashed, packed, and embedded.
+
+### Authoring inputs and compile contract
+
+V0 may accept two authoring families:
+
+- simple JSON/YAML authoring for portable rules
+- SQL assertion files for `query_zero_rows`
+
+Those are authoring surfaces, not the canonical runtime contract. `verify
+compile` must normalize them into `verify.constraint.v1` so that:
+
+- rule IDs, severities, and portability are explicit
+- bindings are declared before execution
+- the runtime never has to guess which semantics a source file implied
+
+For operator ergonomics, an arity-1 CLI shortcut may still accept
+`verify <DATASET> --rules <SOURCE>`, but that path must be equivalent to
+compiling the source and then executing a compiled constraint artifact against a
+single `input` binding.
+
 ### Minimum v1 rule ops
 
 Portable:
@@ -255,6 +362,30 @@ relational checks without pretending those rules are automatically usable inside
 the factory runtime. If the factory needs one of those rules, it should be
 lowered into portable ops or implemented as a dedicated portable rule kind.
 
+### Binding contract
+
+Bindings are named relations, not "files". Batch execution happens to satisfy
+bindings from files; embedded execution satisfies bindings from in-memory
+relations.
+
+For batch execution, v0 supports:
+
+- CSV
+- JSON
+- JSONL
+- Parquet
+
+Format detection follows the spine-era DuckDB assumptions:
+
+| Extension | Reader |
+|-----------|--------|
+| `.csv` | `read_csv_auto` |
+| `.json` | `read_json` |
+| `.jsonl` | `read_json(..., format='newline_delimited')` |
+| `.parquet` | `read_parquet` |
+
+Unknown or unsupported binding formats refuse before rule evaluation.
+
 ### Rule identity and determinism
 
 Every rule must have:
@@ -262,6 +393,8 @@ Every rule must have:
 - stable `id`
 - declared `severity`
 - declared `portability`
+
+Rule IDs must be unique within a constraint set.
 
 Result ordering must be deterministic:
 
@@ -278,7 +411,9 @@ Minimum shape:
 
 ```json
 {
+  "tool": "verify",
   "version": "verify.report.v1",
+  "execution_mode": "batch",
   "outcome": "FAIL",
   "constraint_set_id": "loan_tape.monthly.v1",
   "constraint_hash": "sha256:...",
@@ -301,6 +436,9 @@ Minimum shape:
       "error": 1,
       "warn": 0
     }
+  },
+  "policy_signals": {
+    "severity_band": "ERROR_PRESENT"
   },
   "results": [
     {
@@ -326,14 +464,45 @@ Minimum shape:
 
 Every report must include:
 
+- tool identity
 - constraint set identity
 - exact binding identity
 - exact rule results
 - exact refusal, if any
 
+For batch runs, reports must also preserve:
+
+- exact binding source labels
+- exact binding content hashes
+- lock verification status when `--lock` was used
+
 For factory use, the report must also preserve enough structure to map a failed
 constraint back to affected entity/bucket candidates. That means `affected`
 records are part of the core contract, not an optional pretty-print detail.
+
+`policy_signals.severity_band` should stay narrow and discrete:
+
+- `CLEAN` — no failing rules
+- `WARN_ONLY` — one or more failures, but all failing rules are `warn`
+- `ERROR_PRESENT` — at least one failing rule is `error`
+
+### Output (human)
+
+Default stdout should be a compact operator summary:
+
+```text
+VERIFY FAIL
+constraint_set: loan_tape.monthly.v1
+binding: input=tape.csv
+passed_rules: 2
+failed_rules: 1
+severity_band: ERROR_PRESENT
+
+FAIL POSITIVE_BALANCE binding=input key.loan_id=LN-00421 field=balance value=-500.0
+```
+
+Human mode is a rendering of the same report contract, not a separate semantics
+path.
 
 ## CLI shape
 
@@ -342,6 +511,17 @@ records are part of the core contract, not an optional pretty-print detail.
 ```text
 verify run <CONSTRAINTS> --bind <NAME=PATH>... [--lock <LOCKFILE>]... [--json]
 ```
+
+### Arity-1 ergonomic shortcut
+
+```text
+verify <DATASET> --rules <SOURCE> [OPTIONS]
+```
+
+This is a convenience surface only. It is semantically equivalent to:
+
+1. compile `<SOURCE>` into a temporary `verify.constraint.v1` artifact
+2. execute `verify run <COMPILED>` with `--bind input=<DATASET>`
 
 Examples:
 
@@ -356,7 +536,43 @@ verify run constraints/lease_abstract.v1.json \
   --bind tenants=tenants.jsonl \
   --bind escalations=escalations.csv \
   --json
+
+verify tape.csv \
+  --rules authoring/loan_tape.rules.yaml \
+  --lock dec.lock.json \
+  --json
 ```
+
+### Flags
+
+`verify run` should support:
+
+- `--bind <NAME=PATH>` repeatable, required unless using the arity-1 shortcut
+- `--lock <LOCKFILE>` repeatable
+- `--max-rows <N>` refuse if any bound relation exceeds `N` rows
+- `--max-bytes <N>` refuse if any bound file exceeds `N` bytes before loading
+- `--json`
+- `--no-witness`
+- `--describe`
+- `--schema`
+- `--version`
+
+The arity-1 shortcut should support:
+
+- `--rules <SOURCE>` required
+- `--key <COLUMN>` optional operator hint for arity-1 result localization
+- the same `--lock`, `--max-rows`, `--max-bytes`, `--json`, `--no-witness`,
+  `--describe`, `--schema`, and `--version` flags
+
+### Exit codes
+
+`0` PASS | `1` FAIL | `2` refusal
+
+### Streams
+
+- human mode: PASS / FAIL summary to stdout; refusal to stderr
+- `--json` mode: exactly one JSON object on stdout for PASS, FAIL, or refusal
+- stderr: process diagnostics only
 
 ### Compile step
 
@@ -378,7 +594,12 @@ raw authoring files to silently double as the runtime contract forever.
 verify validate <CONSTRAINTS>
 verify --schema
 verify --describe
+verify witness <query|last|count>
 ```
+
+`verify witness` is read/query-only. It participates in the same local receipt
+log pattern as the other spine tools, but witness remains supplemental local
+context rather than portable evidence.
 
 ## Execution contexts
 
@@ -456,37 +677,172 @@ Tournament logic should not use `verify` as a substitute for `benchmark`.
 
 A self-consistent answer can still be wrong.
 
-## Build order
+## Data model invariants
 
-### Phase 1: lock the protocol
+- `I01` Primitive invariant: arity-1 and arity-N executions emit the same report
+  family and use the same compiled constraint artifact family.
+- `I02` Binding declaration invariant: every binding referenced by a rule must be
+  declared in `bindings`.
+- `I03` Binding satisfaction invariant: every declared binding required for
+  execution must be provided exactly once by the executor.
+- `I04` Rule identity invariant: rule IDs are unique within a constraint set.
+- `I05` Portability invariant: `portable` rules cannot depend on batch-only
+  query execution semantics.
+- `I06` Embedded refusal invariant: embedded execution refuses any batch-only
+  rule that has not been lowered explicitly.
+- `I07` Localization invariant: every failing rule result carries
+  `violation_count`, and failure details localize to affected bindings plus keys
+  and fields when available.
+- `I08` Summary invariant: `total_rules = passed_rules + failed_rules`.
+- `I09` Policy-band invariant: `severity_band` is derived from failing rule
+  severities only and has exactly three values: `CLEAN`, `WARN_ONLY`,
+  `ERROR_PRESENT`.
+- `I10` Input integrity invariant: when `--lock` is provided, all referenced
+  bound inputs must verify before rule evaluation proceeds.
+- `I11` Determinism invariant: same compiled constraint bytes and same bound
+  relation contents produce the same ordered report bytes.
+
+## Refusal codes
+
+### Internal error taxonomy
+
+`verify` should keep internal failures explicit and map them deterministically to
+refusal codes:
+
+| Internal error variant | Maps to | Notes |
+|------------------------|---------|-------|
+| `VerifyError::ConstraintIo` | `E_IO` | Constraint artifact unreadable |
+| `VerifyError::AuthoringIo` | `E_IO` | Authoring source unreadable during compile |
+| `VerifyError::BindingIo` | `E_IO` | Bound file unreadable |
+| `VerifyError::BadConstraint` | `E_BAD_CONSTRAINTS` | Invalid compiled artifact shape or unsupported version |
+| `VerifyError::BadAuthoring` | `E_BAD_AUTHORING` | Invalid JSON/YAML/SQL authoring input |
+| `VerifyError::DuplicateBinding` | `E_DUPLICATE_BINDING` | Same binding name provided twice |
+| `VerifyError::MissingBinding` | `E_MISSING_BINDING` | Declared binding not supplied |
+| `VerifyError::UndeclaredBinding` | `E_UNDECLARED_BINDING` | Extra binding name not declared by the constraint set |
+| `VerifyError::FormatDetect` | `E_FORMAT_DETECT` | Unsupported or ambiguous file format |
+| `VerifyError::FieldReference` | `E_FIELD_NOT_FOUND` | Rule references a field missing from a bound relation |
+| `VerifyError::BadExpression` | `E_BAD_EXPR` | Invalid predicate or aggregate compare expression |
+| `VerifyError::SqlExecution` | `E_SQL_ERROR` | `query_zero_rows` failed in DuckDB |
+| `VerifyError::EmbeddedUnsupported` | `E_BATCH_ONLY_RULE` | Batch-only rule used in embedded execution |
+| `VerifyError::InputNotLocked` | `E_INPUT_NOT_LOCKED` | Bound input missing from provided locks |
+| `VerifyError::InputDrift` | `E_INPUT_DRIFT` | Bound input hash differs from lock member |
+| `VerifyError::TooLarge` | `E_TOO_LARGE` | Bound input exceeds `--max-rows` or `--max-bytes` |
+
+### Refusal table
+
+| Code | Trigger | Next step |
+|------|---------|-----------|
+| `E_IO` | Can't read a constraint source, compiled artifact, or bound input | Check paths and file permissions |
+| `E_BAD_CONSTRAINTS` | Compiled artifact invalid or unrecognized version | Recompile or fix the constraint artifact |
+| `E_BAD_AUTHORING` | JSON/YAML/SQL authoring source invalid | Fix the authoring file, then re-run `verify compile` |
+| `E_DUPLICATE_BINDING` | A binding name was supplied more than once | Remove duplicate `--bind` inputs |
+| `E_MISSING_BINDING` | A declared binding was not provided | Add the missing `--bind` |
+| `E_UNDECLARED_BINDING` | An unknown binding name was provided | Remove or rename the extra `--bind` |
+| `E_FORMAT_DETECT` | Bound input format cannot be loaded | Use CSV, JSON, JSONL, or Parquet |
+| `E_FIELD_NOT_FOUND` | Rule references a missing field | Fix the constraint set or input schema |
+| `E_BAD_EXPR` | Predicate or aggregate expression is invalid | Fix the rule expression |
+| `E_SQL_ERROR` | `query_zero_rows` failed during batch execution | Fix the query-backed rule |
+| `E_BATCH_ONLY_RULE` | Embedded execution received a batch-only rule | Lower the rule or run in batch mode |
+| `E_INPUT_NOT_LOCKED` | Bound input not present in any provided lockfile | Lock the input or provide the correct lock |
+| `E_INPUT_DRIFT` | Bound input hash differs from the lock member | Use the locked artifact or regenerate the lock intentionally |
+| `E_TOO_LARGE` | A bound input exceeds the configured size limit | Increase the limit or split the input |
+
+## Test matrix
+
+Named test suites should exist before calling v0 complete:
+
+- `schema_contract` — compiled artifact and report schemas round-trip and reject
+  invalid fixtures
+- `portable_rules` — `unique`, `not_null`, `predicate`, `row_count`,
+  `aggregate_compare`, and `foreign_key`
+- `query_rules` — `query_zero_rows` happy path, failing path, and SQL refusal
+  path
+- `refusals` — bad authoring, bad compiled artifacts, missing fields, missing
+  bindings, bad locks, and oversize inputs
+- `lock_integration` — `--lock` success, `E_INPUT_NOT_LOCKED`, and
+  `E_INPUT_DRIFT`
+- `cli` — human mode, `--json`, arity-1 shortcut, and exit code mapping
+- `embedding_equivalence` — portable rules emit identical results in batch and
+  embedded execution
+- `determinism` — repeated runs keep report ordering and serialization stable
+
+## Quality gates
+
+Before release or major refactors, `verify` must prove:
+
+- schema validation passes for compiled constraints and reports
+- portable and batch-only rule fixtures pass
+- batch and embedded parity holds for portable rules
+- refusal envelopes are stable and snapshot-tested
+- CLI exit codes match PASS / FAIL / refusal semantics
+
+Exact commands:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test
+```
+
+## Implementation sequence
+
+### D1. Lock the protocol surface
 
 - write `verify.constraint.v1.schema.json`
 - write `verify.report.v1.schema.json`
-- implement domain types in `verify-core`
+- implement domain and refusal types in `verify-core`
 - add canonical serialization and ordering tests
 
-### Phase 2: portable engine
+### D2. Build the portable evaluator
 
-- implement portable rule ops in `verify-engine`
-- add golden fixtures
-- prove determinism across repeated runs
+- implement `unique`
+- implement `not_null`
+- implement `predicate`
+- implement `row_count`
+- implement `aggregate_compare`
+- implement `foreign_key`
 
-### Phase 3: batch executor
+### D3. Add report construction and human rendering
 
-- implement file bindings in `verify-duckdb`
+- materialize summary math and `severity_band`
+- render deterministic human output from the same report model
+- snapshot PASS / FAIL / refusal outputs
+
+### D4. Add batch bindings
+
+- implement CSV / JSON / JSONL / Parquet loading in `verify-duckdb`
+- enforce `--max-bytes` before loading
+- enforce `--max-rows` after relation materialization
+
+### D5. Add CLI surfaces
+
 - implement `verify run`
-- implement lock verification surface in reports
+- implement the arity-1 shortcut `verify <DATASET> --rules <SOURCE>`
+- implement `verify validate`, `--schema`, and `--describe`
 
-### Phase 4: compile surface
+### D6. Add lock verification
 
-- implement `verify compile` for simple authoring files
-- add SQL-backed `query_zero_rows` support
+- verify bound inputs against repeatable `--lock`
+- materialize `input_verification` into reports
+- add `E_INPUT_NOT_LOCKED` and `E_INPUT_DRIFT` fixtures
 
-### Phase 5: factory embedding contract
+### D7. Add compile and query-backed support
 
-- expose embedding API for named in-memory relations
+- implement `verify compile` for JSON/YAML authoring
+- compile SQL-backed assertions into `query_zero_rows`
+- implement `query_zero_rows` batch execution
+
+### D8. Add embedded parity contract
+
+- expose an embedding API for named in-memory relations
 - reject batch-only rules in embedded mode
-- prove CLI and embedded mode emit identical results for the same portable rules
+- prove portable-rule parity between batch and embedded execution
+
+### D9. Close determinism and release gates
+
+- add determinism suite across repeated runs
+- freeze refusal snapshots
+- run the full quality gate on a representative fixture corpus
 
 ## Acceptance criteria for v0
 
