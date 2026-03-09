@@ -5,6 +5,7 @@ set -eu
 #
 # Default behavior:
 # - scans Rust sources only
+# - scans the workspace root with an overlay ignore file that drops test-only paths
 # - fails on CRITICAL findings only
 # - reports warning/info counts for trend tracking
 # - skips only in local environments without UBS installed
@@ -46,16 +47,34 @@ else
   log_file="${TMPDIR:-/tmp}/verify-ubs-gate-$$.log"
   : >"$log_file"
 fi
+ignore_file_tmp=""
+if [ "$#" -eq 1 ] && [ "$1" = "." ]; then
+  if command -v mktemp >/dev/null 2>&1; then
+    ignore_file_tmp=$(mktemp "${TMPDIR:-/tmp}/verify-ubs-gate-ignore.XXXXXX")
+  else
+    ignore_file_tmp="${TMPDIR:-/tmp}/verify-ubs-gate-ignore-$$.txt"
+    : >"$ignore_file_tmp"
+  fi
+  cat >"$ignore_file_tmp" <<'EOF'
+tests/**
+fixtures/**
+EOF
+fi
 
 cleanup() {
-  rm -f "$log_file" "$report_tmp"
+  rm -f "$log_file" "$report_tmp" "$ignore_file_tmp"
 }
 trap cleanup EXIT INT TERM
 
 rm -f "$report_file"
 
+ubs_ignore_args=""
+if [ -n "$ignore_file_tmp" ]; then
+  ubs_ignore_args="--ignore-file=$ignore_file_tmp"
+fi
+
 set +e
-ubs --ci --only=rust "$@" --report-json "$report_tmp" >"$log_file" 2>&1
+ubs --ci --only=rust $ubs_ignore_args "$@" --report-json "$report_tmp" >"$log_file" 2>&1
 ubs_exit=$?
 set -e
 
