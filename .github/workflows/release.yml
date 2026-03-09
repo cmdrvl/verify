@@ -383,15 +383,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured for this repository."
+            exit 1
+          fi
           git clone "https://x-access-token:${GH_TOKEN}@github.com/cmdrvl/homebrew-tap.git" tap
           cp verify.rb tap/Formula/verify.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet; then
+          git add Formula/verify.rb
+          if git diff --cached --quiet; then
             echo "No changes to formula"
           else
-            git add Formula/verify.rb
             git commit -m "verify ${{ steps.version.outputs.version }}"
-            git push
+            git push origin HEAD:main
+            git push origin HEAD:master
           fi
