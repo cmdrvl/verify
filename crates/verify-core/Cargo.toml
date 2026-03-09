@@ -1,0 +1,12 @@
+[package]
+name = "verify-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core protocol types for verify"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

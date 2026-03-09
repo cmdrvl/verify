@@ -1,0 +1,12 @@
+[package]
+name = "verify-duckdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Batch binding and query-rule surface for verify"
+
+[dependencies]
+verify-core = { path = "../verify-core" }
+verify-engine = { path = "../verify-engine" }

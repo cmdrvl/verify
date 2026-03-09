@@ -1,0 +1,11 @@
+[package]
+name = "verify-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable and embedded execution surface for verify"
+
+[dependencies]
+verify-core = { path = "../verify-core" }

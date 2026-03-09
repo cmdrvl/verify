@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "verify.report.v1",
+  "type": "object",
+  "description": "Scaffold placeholder; bd-18u owns the real report contract.",
+  "properties": {},
+  "additionalProperties": true
+}

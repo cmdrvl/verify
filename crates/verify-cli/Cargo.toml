@@ -1,0 +1,19 @@
+[package]
+name = "verify-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI entrypoint for verify"
+
+[[bin]]
+name = "verify"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+verify-core = { path = "../verify-core" }
+verify-duckdb = { path = "../verify-duckdb" }
+verify-engine = { path = "../verify-engine" }

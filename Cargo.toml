@@ -1,0 +1,27 @@
+[workspace]
+members = [
+  "crates/verify-core",
+  "crates/verify-engine",
+  "crates/verify-duckdb",
+  "crates/verify-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["CMD+RVL <engineering@cmdrvl.com>"]
+license = "MIT"
+repository = "https://github.com/cmdrvl/verify"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

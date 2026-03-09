@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "verify.constraint.v1",
+  "type": "object",
+  "description": "Scaffold placeholder; bd-18u owns the real compiled constraint contract.",
+  "properties": {},
+  "additionalProperties": true
+}
