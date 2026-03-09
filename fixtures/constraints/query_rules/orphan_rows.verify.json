@@ -1,0 +1,27 @@
+{
+  "version": "verify.constraint.v1",
+  "constraint_set_id": "fixtures.query_rules.orphan_rows",
+  "bindings": [
+    {
+      "name": "property",
+      "kind": "relation",
+      "key_fields": ["property_id"]
+    },
+    {
+      "name": "tenants",
+      "kind": "relation"
+    }
+  ],
+  "rules": [
+    {
+      "id": "ORPHAN_PROPERTY_TENANT",
+      "severity": "error",
+      "portability": "batch_only",
+      "check": {
+        "op": "query_zero_rows",
+        "bindings": ["property", "tenants"],
+        "query": "SELECT 'property' AS binding, 'tenant_id' AS field, property.tenant_id AS value, property.property_id AS key__property_id FROM property LEFT JOIN tenants ON property.tenant_id = tenants.tenant_id WHERE tenants.tenant_id IS NULL"
+      }
+    }
+  ]
+}

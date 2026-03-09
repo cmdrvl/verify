@@ -1,0 +1,9 @@
+{
+  "version": "lock.input.v1",
+  "members": [
+    {
+      "path": "fixtures/inputs/arity1/loans.csv",
+      "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

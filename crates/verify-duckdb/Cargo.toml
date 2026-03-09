@@ -7,6 +7,18 @@ license.workspace = true
 repository.workspace = true
 description = "Batch binding and query-rule surface for verify"
 
+[[test]]
+name = "query_rules"
+path = "../../tests/query_rules.rs"
+
+[[test]]
+name = "lock_integration"
+path = "../../tests/lock_integration.rs"
+
 [dependencies]
+duckdb = { version = "1.4.4", features = ["json", "parquet"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
 verify-core = { path = "../verify-core" }
 verify-engine = { path = "../verify-engine" }

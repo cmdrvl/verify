@@ -1,0 +1,41 @@
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "PASS",
+  "constraint_set_id": "fixtures.arity1.not_null_loans",
+  "constraint_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bindings": {
+    "input": {
+      "kind": "relation",
+      "source": "fixtures/inputs/arity1/loans.csv",
+      "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "input_verification": {
+        "status": "VERIFIED",
+        "locks": ["fixtures/locks/arity1/loans.lock.json"]
+      }
+    }
+  },
+  "summary": {
+    "total_rules": 1,
+    "passed_rules": 1,
+    "failed_rules": 0,
+    "by_severity": {
+      "error": 0,
+      "warn": 0
+    }
+  },
+  "policy_signals": {
+    "severity_band": "CLEAN"
+  },
+  "results": [
+    {
+      "rule_id": "INPUT_LOAN_ID_PRESENT",
+      "severity": "error",
+      "status": "pass",
+      "violation_count": 0,
+      "affected": []
+    }
+  ],
+  "refusal": null
+}

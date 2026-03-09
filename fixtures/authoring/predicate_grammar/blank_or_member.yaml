@@ -1,0 +1,17 @@
+constraint_set_id: fixtures.predicate.blank_or_member
+bindings:
+  input:
+    key_fields:
+      - loan_id
+rules:
+  - id: OCCUPANCY_ALLOWED_OR_BLANK
+    severity: warn
+    binding: input
+    op: predicate
+    expr:
+      or:
+        - in:
+            - column: occupancy_status
+            - [owner, investor]
+        - blank:
+            column: occupancy_status

@@ -26,3 +26,6 @@ target
 
 # ntm runtime state
 .ntm/
+
+# Agent-specific build directories
+target-*/

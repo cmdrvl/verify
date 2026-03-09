@@ -1,0 +1,30 @@
+{
+  "version": "verify.constraint.v1",
+  "constraint_set_id": "fixtures.arity_n.foreign_key_property_tenants",
+  "bindings": [
+    {
+      "name": "property",
+      "kind": "relation",
+      "key_fields": ["property_id"]
+    },
+    {
+      "name": "tenants",
+      "kind": "relation",
+      "key_fields": ["tenant_id"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "PROPERTY_TENANT_EXISTS",
+      "severity": "error",
+      "portability": "portable",
+      "check": {
+        "op": "foreign_key",
+        "binding": "property",
+        "columns": ["tenant_id"],
+        "ref_binding": "tenants",
+        "ref_columns": ["tenant_id"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+constraint_set_id: fixtures.arity_n.foreign_key_property_tenants
+bindings:
+  property:
+    key_fields:
+      - property_id
+  tenants:
+    key_fields:
+      - tenant_id
+rules:
+  - id: PROPERTY_TENANT_EXISTS
+    severity: error
+    binding: property
+    op: foreign_key
+    columns:
+      - tenant_id
+    ref_binding: tenants
+    ref_columns:
+      - tenant_id

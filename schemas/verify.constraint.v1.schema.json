@@ -2,7 +2,604 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "verify.constraint.v1",
   "type": "object",
-  "description": "Scaffold placeholder; bd-18u owns the real compiled constraint contract.",
-  "properties": {},
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "constraint_set_id",
+    "bindings",
+    "rules"
+  ],
+  "properties": {
+    "version": {
+      "const": "verify.constraint.v1"
+    },
+    "constraint_set_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/binding"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "relation"
+        },
+        "key_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "portability",
+        "check"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warn"
+          ]
+        },
+        "portability": {
+          "enum": [
+            "portable",
+            "batch_only"
+          ]
+        },
+        "check": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/unique_check"
+            },
+            {
+              "$ref": "#/$defs/not_null_check"
+            },
+            {
+              "$ref": "#/$defs/predicate_check"
+            },
+            {
+              "$ref": "#/$defs/row_count_check"
+            },
+            {
+              "$ref": "#/$defs/aggregate_compare_check"
+            },
+            {
+              "$ref": "#/$defs/foreign_key_check"
+            },
+            {
+              "$ref": "#/$defs/query_zero_rows_check"
+            }
+          ]
+        }
+      }
+    },
+    "named_columns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "column_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "column"
+      ],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "scalar": {
+      "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+      ]
+    },
+    "predicate_operand": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/column_ref"
+        },
+        {
+          "$ref": "#/$defs/scalar"
+        }
+      ]
+    },
+    "binary_predicate_operands": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/predicate_operand"
+      }
+    },
+    "predicate_expr": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/column_ref"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eq"
+          ],
+          "properties": {
+            "eq": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ne"
+          ],
+          "properties": {
+            "ne": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gt"
+          ],
+          "properties": {
+            "gt": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "gte"
+          ],
+          "properties": {
+            "gte": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lt"
+          ],
+          "properties": {
+            "lt": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lte"
+          ],
+          "properties": {
+            "lte": {
+              "$ref": "#/$defs/binary_predicate_operands"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "and"
+          ],
+          "properties": {
+            "and": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate_expr"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "or"
+          ],
+          "properties": {
+            "or": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate_expr"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/predicate_expr"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "in"
+          ],
+          "properties": {
+            "in": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                {
+                  "$ref": "#/$defs/predicate_operand"
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/scalar"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "is_null"
+          ],
+          "properties": {
+            "is_null": {
+              "$ref": "#/$defs/column_ref"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "is_blank"
+          ],
+          "properties": {
+            "is_blank": {
+              "$ref": "#/$defs/column_ref"
+            }
+          }
+        }
+      ]
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eq": {
+          "$ref": "#/$defs/scalar"
+        },
+        "ne": {
+          "$ref": "#/$defs/scalar"
+        },
+        "gt": {
+          "$ref": "#/$defs/scalar"
+        },
+        "gte": {
+          "$ref": "#/$defs/scalar"
+        },
+        "lt": {
+          "$ref": "#/$defs/scalar"
+        },
+        "lte": {
+          "$ref": "#/$defs/scalar"
+        },
+        "tolerance": {
+          "type": "number"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "eq"
+          ]
+        },
+        {
+          "required": [
+            "ne"
+          ]
+        },
+        {
+          "required": [
+            "gt"
+          ]
+        },
+        {
+          "required": [
+            "gte"
+          ]
+        },
+        {
+          "required": [
+            "lt"
+          ]
+        },
+        {
+          "required": [
+            "lte"
+          ]
+        }
+      ]
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sum": {
+          "type": "string",
+          "minLength": 1
+        },
+        "avg": {
+          "type": "string",
+          "minLength": 1
+        },
+        "min": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "sum"
+          ]
+        },
+        {
+          "required": [
+            "avg"
+          ]
+        },
+        {
+          "required": [
+            "min"
+          ]
+        },
+        {
+          "required": [
+            "max"
+          ]
+        }
+      ]
+    },
+    "unique_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "columns"
+      ],
+      "properties": {
+        "op": {
+          "const": "unique"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "columns": {
+          "$ref": "#/$defs/named_columns"
+        }
+      }
+    },
+    "not_null_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "columns"
+      ],
+      "properties": {
+        "op": {
+          "const": "not_null"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "columns": {
+          "$ref": "#/$defs/named_columns"
+        }
+      }
+    },
+    "predicate_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "expr"
+      ],
+      "properties": {
+        "op": {
+          "const": "predicate"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expr": {
+          "$ref": "#/$defs/predicate_expr"
+        }
+      }
+    },
+    "row_count_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "compare"
+      ],
+      "properties": {
+        "op": {
+          "const": "row_count"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compare": {
+          "$ref": "#/$defs/comparison"
+        }
+      }
+    },
+    "aggregate_compare_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "aggregate",
+        "compare"
+      ],
+      "properties": {
+        "op": {
+          "const": "aggregate_compare"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregate": {
+          "$ref": "#/$defs/aggregate"
+        },
+        "compare": {
+          "$ref": "#/$defs/comparison"
+        }
+      }
+    },
+    "foreign_key_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "binding",
+        "columns",
+        "ref_binding",
+        "ref_columns"
+      ],
+      "properties": {
+        "op": {
+          "const": "foreign_key"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "columns": {
+          "$ref": "#/$defs/named_columns"
+        },
+        "ref_binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref_columns": {
+          "$ref": "#/$defs/named_columns"
+        }
+      }
+    },
+    "query_zero_rows_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "bindings",
+        "query"
+      ],
+      "properties": {
+        "op": {
+          "const": "query_zero_rows"
+        },
+        "bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
 }

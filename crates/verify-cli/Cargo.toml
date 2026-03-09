@@ -11,9 +11,29 @@ description = "CLI entrypoint for verify"
 name = "verify"
 path = "src/main.rs"
 
+[[test]]
+name = "cli"
+path = "../../tests/cli.rs"
+
+[[test]]
+name = "perf_smoke"
+path = "../../tests/perf_smoke.rs"
+
+[[test]]
+name = "determinism"
+path = "../../tests/determinism.rs"
+
+[[test]]
+name = "portable_rules"
+path = "../../tests/portable_rules.rs"
+
 [dependencies]
 clap.workspace = true
+duckdb = "1.4.4"
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
+sha2 = "0.10"
 verify-core = { path = "../verify-core" }
 verify-duckdb = { path = "../verify-duckdb" }
 verify-engine = { path = "../verify-engine" }

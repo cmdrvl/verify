@@ -1,0 +1,45 @@
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "FAIL",
+  "constraint_set_id": "fixtures.arity1.not_null_loans",
+  "constraint_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bindings": {
+    "input": {
+      "kind": "relation",
+      "source": "fixtures/inputs/arity1/loans_missing_id.csv",
+      "content_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "input_verification": null
+    }
+  },
+  "summary": {
+    "total_rules": 1,
+    "passed_rules": 0,
+    "failed_rules": 1,
+    "by_severity": {
+      "error": 1,
+      "warn": 0
+    }
+  },
+  "policy_signals": {
+    "severity_band": "ERROR_PRESENT"
+  },
+  "results": [
+    {
+      "rule_id": "INPUT_LOAN_ID_PRESENT",
+      "severity": "error",
+      "status": "fail",
+      "violation_count": 1,
+      "affected": [
+        {
+          "binding": "input",
+          "key": {},
+          "field": "loan_id",
+          "value": ""
+        }
+      ]
+    }
+  ],
+  "refusal": null
+}

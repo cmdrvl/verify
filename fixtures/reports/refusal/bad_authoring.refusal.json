@@ -1,0 +1,30 @@
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "REFUSAL",
+  "constraint_set_id": "fixtures.refusals.missing_binding",
+  "constraint_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "bindings": {},
+  "summary": {
+    "total_rules": 0,
+    "passed_rules": 0,
+    "failed_rules": 0,
+    "by_severity": {
+      "error": 0,
+      "warn": 0
+    }
+  },
+  "policy_signals": {
+    "severity_band": "CLEAN"
+  },
+  "results": [],
+  "refusal": {
+    "code": "E_MISSING_BINDING",
+    "message": "Constraint set expects binding property, but no input was supplied for it.",
+    "detail": {
+      "binding": "property"
+    },
+    "next_step": "Add the missing --bind property=... input before running verify."
+  }
+}

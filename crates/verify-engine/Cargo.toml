@@ -7,5 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Portable and embedded execution surface for verify"
 
+[[test]]
+name = "embedding_equivalence"
+path = "../../tests/embedding_equivalence.rs"
+
 [dependencies]
+serde_json.workspace = true
 verify-core = { path = "../verify-core" }

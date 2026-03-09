@@ -1,0 +1,18 @@
+constraint_set_id: fixtures.refusals.missing_binding
+bindings:
+  input:
+    key_fields:
+      - loan_id
+  property:
+    key_fields:
+      - property_id
+rules:
+  - id: PROPERTY_LOAN_EXISTS
+    severity: error
+    binding: property
+    op: foreign_key
+    columns:
+      - loan_id
+    ref_binding: input
+    ref_columns:
+      - loan_id

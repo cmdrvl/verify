@@ -1,0 +1,12 @@
+constraint_set_id: fixtures.arity1.not_null_loans
+bindings:
+  input:
+    key_fields:
+      - loan_id
+rules:
+  - id: INPUT_LOAN_ID_PRESENT
+    severity: error
+    binding: input
+    op: not_null
+    columns:
+      - loan_id

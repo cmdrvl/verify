@@ -1,0 +1,44 @@
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "PASS",
+  "constraint_set_id": "fixtures.query_rules.orphan_rows",
+  "constraint_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "bindings": {
+    "property": {
+      "kind": "relation",
+      "source": "fixtures/inputs/arity_n/property_no_orphans.csv",
+      "content_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "input_verification": null
+    },
+    "tenants": {
+      "kind": "relation",
+      "source": "fixtures/inputs/arity_n/tenants.csv",
+      "content_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "input_verification": null
+    }
+  },
+  "summary": {
+    "total_rules": 1,
+    "passed_rules": 1,
+    "failed_rules": 0,
+    "by_severity": {
+      "error": 0,
+      "warn": 0
+    }
+  },
+  "policy_signals": {
+    "severity_band": "CLEAN"
+  },
+  "results": [
+    {
+      "rule_id": "ORPHAN_PROPERTY_TENANT",
+      "severity": "error",
+      "status": "pass",
+      "violation_count": 0,
+      "affected": []
+    }
+  ],
+  "refusal": null
+}
