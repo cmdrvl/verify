@@ -332,7 +332,117 @@ The final implementation must have named coverage for:
 
 ---
 
-## Beads Execution Shape
+## MCP Agent Mail — Multi-Agent Coordination
+
+Agent Mail is the coordination layer for multi-agent sessions in this repo:
+identities, inbox/outbox, thread history, and advisory file reservations.
+
+### Session Baseline
+
+1. If direct MCP Agent Mail tools are available in this harness, ensure project
+   and reuse your identity:
+   - `ensure_project(project_key=<abs-path>)`
+   - `whois(project_key, agent_name)` or `register_agent(...)` only if identity
+     does not exist
+2. Reserve only exact files you will edit:
+   - Allowed: `crates/verify-engine/src/portable_row.rs`,
+     `tests/query_rules.rs`
+   - Not allowed: `crates/verify-engine/**`, `tests/**`, whole directories
+3. Send a short start message and finish message for each bead, reusing the
+   bead ID as the thread when practical.
+4. Check inbox at moderate cadence (roughly every 2-5 minutes), not
+   continuously.
+
+### Important `ntm` Boundary
+
+When this repo is worked via `ntm`, the session may be connected to Agent Mail
+even if the spawned Codex or Claude harness does **not** expose direct
+`mcp__mcp-agent-mail__...` tools.
+
+If direct MCP Agent Mail tools are unavailable:
+
+- do **not** stop working just because mail tools are absent
+- continue with `br`, exact file reservations via the available coordination
+  surface, and overseer instructions
+- treat Beads + narrow file ownership as the minimum coordination contract
+
+### Stability Rules
+
+- Do not run retry loops for `register_agent`, `create_agent_identity`, or
+  `macro_start_session`.
+- If a call fails with a transient DB/SQLite lock error, back off for 90
+  seconds before retrying.
+- Continue bead work while waiting for retry windows; do not block all progress
+  on mail retries.
+
+### Communication Rules
+
+- If a message has `ack_required=true`, acknowledge it promptly.
+- Keep bead updates short and explicit: start message, finish message, blocker
+  message.
+- Reuse a stable bead thread when possible for searchable history.
+
+### Reservation Rules
+
+- Reserve only specific files you are actively editing.
+- Never reserve entire directories or broad patterns.
+- If a reservation conflict appears, pick another unblocked bead or a
+  non-overlapping file.
+
+---
+
+## CI / Release Target State
+
+`verify` does not have CI or release automation yet, but the implementation
+must land with the same release-grade surface as the stronger spine tools.
+
+Target release surface:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/release.yml`
+- `scripts/ubs_gate.sh`
+- `LICENSE`
+- cross-target packaged archives
+- `SHA256SUMS`, signing, SBOM, and provenance output
+- Homebrew tap update workflow parity
+
+Do not treat release automation as optional cleanup after the implementation is
+"basically done." It is part of the repo contract.
+
+---
+
+## Beads (br) — Execution Shape
+
+Beads is the execution source of truth in this repo.
+
+- Beads = task graph, state, priorities, dependencies
+- Agent Mail = coordination, reservations, audit trail
+
+Core commands:
+
+```bash
+br ready
+br show <id>
+br update <id> --status in_progress
+br close <id> --reason "Completed"
+br sync --flush-only
+```
+
+Conventions:
+
+- include bead IDs in coordination subjects, for example
+  `[bd-18u] Start schema and core types`
+- use the bead ID in reservation reasons when the tool supports it
+- prefer concrete ready beads over the epic tracker
+
+Workflow:
+
+1. Start with `br ready`.
+2. Mark the bead `in_progress` before editing.
+3. Reserve exact files and send a short start update when coordination tools are
+   available.
+4. Implement and run the relevant quality gate.
+5. Close the bead, send a completion note, and release reservations.
 
 This repo already has a swarm-oriented Beads graph.
 
