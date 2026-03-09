@@ -406,6 +406,144 @@ lowered into portable ops or implemented as a dedicated portable rule kind.
 
 Portable op semantics must be executable without DuckDB-specific query text.
 
+#### `not_null` missingness semantics
+
+V0 must pin missingness semantics for string-like batch inputs explicitly.
+
+For CSV / JSON / JSONL / Parquet bindings:
+
+- `null` is missing
+- empty string is blank
+- whitespace-only string is blank
+
+For `not_null`, null and blank both fail.
+
+This is deliberate. For the spine's batch surfaces, operators use `not_null`
+when they mean "present with substantive content", not merely "column key
+exists". If a future version needs a distinction between null-only and
+blank-aware presence checks, it should add a new op rather than weakening
+`not_null` silently.
+
+#### `predicate` expression contract
+
+`predicate` needs a real v0 grammar, not just the idea of "some expression".
+
+Minimum expression forms:
+
+- comparison:
+  - `eq`
+  - `ne`
+  - `gt`
+  - `gte`
+  - `lt`
+  - `lte`
+- boolean composition:
+  - `and`
+  - `or`
+  - `not`
+- set membership:
+  - `in`
+- presence checks:
+  - `is_null`
+  - `is_blank`
+- value access:
+  - `{ "column": "<NAME>" }`
+
+Examples:
+
+```json
+{
+  "op": "predicate",
+  "binding": "candidate",
+  "expr": {
+    "eq": [
+      { "column": "row_type" },
+      "holding"
+    ]
+  }
+}
+```
+
+```json
+{
+  "op": "predicate",
+  "binding": "alignment",
+  "expr": {
+    "in": [
+      { "column": "match_status" },
+      ["MATCHED", "UNMATCHED_GOLD", "UNMATCHED_CANDIDATE", "AMBIGUOUS"]
+    ]
+  }
+}
+```
+
+Implication is expressed through normal boolean form, not a dedicated `if`
+operator in v0. Example:
+
+```json
+{
+  "op": "predicate",
+  "binding": "alignment",
+  "expr": {
+    "or": [
+      {
+        "ne": [
+          { "column": "match_status" },
+          "MATCHED"
+        ]
+      },
+      {
+        "and": [
+          {
+            "not": {
+              "or": [
+                { "is_null": { "column": "benchmark_entity_key" } },
+                { "is_blank": { "column": "benchmark_entity_key" } }
+              ]
+            }
+          },
+          {
+            "not": {
+              "or": [
+                { "is_null": { "column": "candidate_row_id" } },
+                { "is_blank": { "column": "candidate_row_id" } }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This is the minimum needed to express structural tournament rules without
+smuggling hidden semantics into the evaluator.
+
+#### `query_zero_rows` localization contract
+
+`query_zero_rows` must not stop at row counting. It needs a deterministic map
+from query output rows into `results[].affected[]`.
+
+Reserved result columns for query-backed failures:
+
+- `binding` — required binding name implicated by the violating row
+- `field` — optional implicated field/column name
+- `value` — optional observed value
+- `key__<COLUMN>` — optional key component for the affected row
+
+Rules:
+
+- every returned row becomes one `affected` entry
+- if `binding` is absent, the rule's first declared binding is used
+- `key__<COLUMN>` columns are collected into the `affected.key` object with the
+  `key__` prefix stripped
+- all non-reserved columns are ignored for the portable report surface unless a
+  future version promotes them explicitly
+
+This keeps batch-only SQL checks compatible with the core localization contract
+instead of turning them into opaque failure counts.
+
 ### Binding contract
 
 Bindings are named relations, not "files". Batch execution happens to satisfy
@@ -416,6 +554,16 @@ Bindings may optionally declare `key_fields`. These are not required for rule
 evaluation, but they are the canonical localization surface for failed rows in
 reports when the relation has a stable entity key. This matters because
 localized failures are part of the protocol, not just CLI sugar.
+
+For batch-loaded string fields, the executor must preserve raw scalar content
+for reporting but also apply the v0 missingness rules consistently:
+
+- null stays null
+- empty string counts as blank
+- whitespace-only string counts as blank
+
+Rule evaluation must not depend on DuckDB's incidental distinction between
+`''`, `'   '`, and `NULL` for presence-sensitive checks.
 
 For batch execution, v0 supports:
 
@@ -552,6 +700,10 @@ Minimum shape:
 | `key` | object | yes | Key tuple when the binding exposes `key_fields` |
 | `field` | string | yes | Field/column implicated by the failure |
 | `value` | any | yes | Observed value that caused the failure |
+
+For `query_zero_rows`, `affected` entries are populated from the reserved query
+output columns described above. That mapping is part of the protocol contract,
+not implementation-local convenience behavior.
 
 ### Required report properties
 
@@ -838,6 +990,13 @@ A self-consistent answer can still be wrong.
   bound inputs must verify before rule evaluation proceeds.
 - `I14` Determinism invariant: same compiled constraint bytes and same bound
   relation contents produce the same ordered report bytes.
+- `I15` Blank semantics invariant: `not_null` fails on null, empty string, and
+  whitespace-only string for string-like batch inputs.
+- `I16` Predicate grammar invariant: all portable predicate expressions reduce
+  to the declared v0 grammar; no executor-specific hidden operators are allowed.
+- `I17` Query localization invariant: every `query_zero_rows` failure row maps
+  deterministically into one `affected` entry via the reserved output-column
+  contract.
 
 ## Refusal codes
 
@@ -977,6 +1136,12 @@ Named test suites should exist before calling v0 complete:
   `aggregate_compare`, and `foreign_key`
 - `query_rules` — `query_zero_rows` happy path, failing path, and SQL refusal
   path
+- `batch_missingness` — null, empty string, and whitespace-only string behave
+  identically for `not_null`
+- `predicate_grammar` — equality, membership, boolean composition, and
+  null/blank checks round-trip through authoring and execute deterministically
+- `query_localization` — reserved SQL result columns map into `affected`
+  bindings / keys / fields / values deterministically
 - `refusals` — bad authoring, bad compiled artifacts, missing fields, missing
   bindings, bad locks, and oversize inputs
 - `lock_integration` — `--lock` success, `E_INPUT_NOT_LOCKED`, and
@@ -1023,6 +1188,7 @@ cargo test
 - implement `row_count`
 - implement `aggregate_compare`
 - implement `foreign_key`
+- freeze the v0 predicate grammar before calling portable evaluation done
 
 ### D3. Add report construction and human rendering
 
@@ -1055,6 +1221,8 @@ cargo test
 - implement `verify compile --check` and `verify compile --schema`
 - compile SQL-backed assertions into `query_zero_rows`
 - implement `query_zero_rows` batch execution
+- implement reserved-column mapping from `query_zero_rows` results into
+  `affected` entries
 
 ### D8. Add embedded parity contract
 
