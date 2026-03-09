@@ -214,7 +214,7 @@ jobs:
 
       - name: Generate SBOM
         run: |
-          cargo cyclonedx -p verify-cli --format json --override-filename sbom.cdx
+          cargo cyclonedx --format json --override-filename sbom.cdx
           mv sbom.cdx.json dist/sbom.cdx.json
 
       - name: Generate provenance
