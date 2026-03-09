@@ -49,22 +49,23 @@ What `verify` does not own:
 
 ## Current Repository State
 
-This repo is **pre-implementation but plan-complete**.
+The v0 implementation is **landed and passing all quality gates**.
 
-Current contents:
+The Rust workspace contains four crates (`verify-core`, `verify-engine`,
+`verify-duckdb`, `verify-cli`) with a working `verify` binary, CI workflows,
+and full test coverage across all named behavior suites.
 
-- [docs/plan.md](./docs/plan.md) — full implementation-grade spec
+Key references:
+
+- [docs/plan.md](./docs/plan.md) — implementation-grade spec
 - [docs/PLAN_VERIFY.md](./docs/PLAN_VERIFY.md) — legacy feature framing only
-- [.beads/issues.jsonl](./.beads/issues.jsonl) — execution graph for the swarm
-- [README.md](./README.md) — operator-facing contract and project framing
+- [.beads/issues.jsonl](./.beads/issues.jsonl) — execution graph
+- [README.md](./README.md) — operator-facing contract and quickstart
 
-There is no Rust workspace yet. The first implementation task is the scaffold
-bead.
-
-Implication:
+Implication for new work:
 
 - do not invent architecture beyond the plan
-- do not collapse future crate boundaries into one temporary crate
+- do not collapse crate boundaries
 - do not add behavior just because it seems reasonable if the plan does not say
   to do it
 
@@ -73,22 +74,26 @@ Implication:
 ## Quick Reference
 
 ```bash
-# Read the spec first
-sed -n '1,360p' docs/plan.md
+# Build
+cargo build --release -p verify-cli
+
+# Robot triage
+bv -robot-alerts -alert-type stale_issue
+bv -robot-alerts -alert-type blocking_cascade
+
+# Quality gates
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+ubs .
 
 # See the execution graph
 br ready
 br blocked
 
-# Current docs-only verification
+# Docs-only verification
 git diff --check
 ubs --diff
-
-# Mandatory gate once the workspace exists
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test
-ubs .
 ```
 
 ---
@@ -105,9 +110,7 @@ repo direction is one `verify` primitive with two execution contexts.
 
 ---
 
-## Planned File Map
-
-The intended implementation structure is:
+## File Map
 
 | Path | Purpose |
 |------|---------|
@@ -138,7 +141,16 @@ The intended implementation structure is:
 | `crates/verify-cli/src/render/human.rs` | human report rendering |
 | `schemas/*.json` | schema contracts |
 | `fixtures/**` | authoring, inputs, locks, reports |
-| `tests/*.rs` | named behavior suites from the plan |
+| `tests/cli.rs` | CLI exit/output integration tests |
+| `tests/schema_contract.rs` | fixture/schema round-trip validation |
+| `tests/portable_rules.rs` | full compile → bind → evaluate pipeline |
+| `tests/query_rules.rs` | query_zero_rows localization tests |
+| `tests/refusals.rs` | refusal path coverage |
+| `tests/lock_integration.rs` | lock verification tests |
+| `tests/determinism.rs` | byte-identical report determinism proof |
+| `tests/perf_smoke.rs` | performance guardrail tests |
+| `tests/gen_fixtures.rs` | deterministic fixture generators |
+| `tests/embedding_equivalence.rs` | batch/embedded parity |
 | `tests/support/**` | shared fixture helpers only |
 
 Critical structural rules:
@@ -153,7 +165,7 @@ Critical structural rules:
 
 ## Output Contract (Critical)
 
-Target domain outcomes:
+Domain outcomes:
 
 | Exit | Outcome | Meaning |
 |------|---------|---------|
@@ -161,21 +173,22 @@ Target domain outcomes:
 | `1` | `FAIL` | one or more rules failed |
 | `2` | `REFUSAL` | verify could not evaluate safely |
 
-Target output modes:
+Output modes:
 
 - default stdout: compact human-readable report
 - `--json`: machine-readable full `verify.report.v1`
 - stderr: process diagnostics only
 
-Target command family:
+Command family:
 
-- `verify run <COMPILED_CONSTRAINTS> --bind ...`
-- `verify <DATASET> --rules <AUTHORING>` for the arity-1 shortcut
-- `verify compile`
-- `verify validate`
+- `verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--no-witness]`
+- `verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--no-witness]`
+- `verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]`
+- `verify compile --schema`
+- `verify validate <COMPILED_CONSTRAINTS> [--json]`
+- `verify witness [ACTION] [--json]`
 - `verify --schema`
-- `verify --describe`
-- `verify witness`
+- `verify --describe` (currently scaffold-only refusal)
 
 Refusal envelopes are part of the protocol. Do not replace them with ad hoc
 text or mix diagnostics into stdout evidence.
@@ -275,19 +288,18 @@ fit either tier cleanly, stop and update the plan first.
 
 ## Toolchain
 
-Target implementation assumptions:
-
 - language: Rust
 - package manager: Cargo only
 - edition: 2024
-- unsafe code: forbidden
+- unsafe code: forbidden (`#![forbid(unsafe_code)]`)
 
-Expected dependency profile:
+Dependencies:
 
 - `clap` for CLI parsing
 - `serde` and `serde_json` for structured artifacts
+- `serde_yaml` for YAML authoring
 - `duckdb` for batch relation loading and query execution
-- `sha2` or equivalent for content hashing
+- `sha2` for content hashing
 - small, pinned dependencies only
 
 Do not add large convenience layers or alternate execution runtimes casually.
@@ -296,39 +308,33 @@ Do not add large convenience layers or alternate execution runtimes casually.
 
 ## Quality Gates
 
-### Current docs-only state
-
-Run this after doc-only changes:
+Run after doc-only changes:
 
 ```bash
 git diff --check
 ubs --diff
 ```
 
-### After scaffold lands
-
-Run this after substantive code changes:
+Run after any code changes:
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test
+cargo test --workspace
 ubs .
 ```
 
-### Stop-ship verification target
+Named test suite coverage (all implemented):
 
-The final implementation must have named coverage for:
-
-- schema contracts
-- portable rule behavior
-- query-rule behavior
-- refusal paths
-- lock integration
-- CLI exit/output behavior
-- embedded parity
-- determinism
-- perf smoke guardrails
+- `schema_contract` — fixture/schema round-trips
+- `portable_rules` — compile → bind → evaluate pipeline
+- `query_rules` — query_zero_rows localization
+- `refusals` — refusal path coverage
+- `lock_integration` — lock verification
+- `cli` — CLI exit/output behavior
+- `embedding_equivalence` — batch/embedded parity
+- `determinism` — byte-identical report proof
+- `perf_smoke` — performance guardrail tests
 
 ---
 
@@ -391,27 +397,23 @@ If direct MCP Agent Mail tools are unavailable:
 
 ---
 
-## CI / Release Target State
+## CI / Release
 
-`verify` does not have CI or release automation yet, but the implementation
-must land with the same release-grade surface as the stronger spine tools.
+CI and release workflows are in place:
 
-Target release surface:
-
-- `.github/workflows/ci.yml`
-- `.github/workflows/release.yml`
-- `scripts/ubs_gate.sh`
-- `LICENSE`
-- cross-target packaged archives
-- `SHA256SUMS`, signing, SBOM, and provenance output
-- Homebrew tap update workflow parity
-
-Do not treat release automation as optional cleanup after the implementation is
-"basically done." It is part of the repo contract.
+- `.github/workflows/ci.yml` — fmt, clippy, test, UBS, cross-platform build
+- `.github/workflows/release.yml` — cross-target release matrix (5 targets),
+  SHA256SUMS, cosign signing, CycloneDX SBOM, SLSA provenance, GitHub Release,
+  Homebrew tap update
+- `scripts/ubs_gate.sh` — UBS critical-only gate script
+- `LICENSE` — MIT
 
 ---
 
 ## Beads (br) — Execution Shape
+
+**Note:** `br` is non-invasive. If you run `br sync --flush-only`, remember to
+stage any resulting `.beads/` changes in your normal git workflow.
 
 Beads is the execution source of truth in this repo.
 
@@ -438,33 +440,23 @@ Conventions:
 Workflow:
 
 1. Start with `br ready`.
-2. Mark the bead `in_progress` before editing.
-3. Reserve exact files and send a short start update when coordination tools are
+2. Use `bv -robot-alerts` when you need robot triage for stale or blocked work.
+3. Mark the bead `in_progress` before editing.
+4. Reserve exact files and send a short start update when coordination tools are
    available.
-4. Implement and run the relevant quality gate.
-5. Close the bead, send a completion note, and release reservations.
+5. Implement and run the relevant quality gate.
+6. If you changed Beads metadata, run `br sync --flush-only`.
+7. Close the bead, send a completion note, and release reservations.
 
-This repo already has a swarm-oriented Beads graph.
-
-Current first task:
-
-- `bd-3fq` — bootstrap verify workspace, crates, and swarm-safe file skeleton
-
-After that closes, the immediate parallel lanes are:
-
-- `bd-18u` core schemas/types
-- `bd-p82` fixtures/support
-- `bd-254` run CLI shell
-- `bd-21w` compile/validate/schema shell
-- `bd-12i` DuckDB bindings/size guards
-- `bd-rld` witness surface
+This repo has a swarm-oriented Beads graph. Most foundation and
+implementation beads are closed. Use `br ready` to find remaining work.
 
 Implication for agents:
 
 - do not freeload architecture into your bead
 - do not reopen files assigned to another lane unless the user explicitly wants
   a replan
-- use the pre-split file map to avoid collisions
+- use the file map to avoid collisions
 
 ---
 
@@ -511,15 +503,20 @@ Practical rule:
 ```bash
 cd verify
 br ready
-br show bd-3fq
+bv -robot-alerts -alert-type stale_issue
+bv -robot-alerts -alert-type blocking_cascade
+br show <bead-id>
 git diff --check
 ```
 
 If you are implementing:
 
 1. read `docs/plan.md`
-2. claim a ready bead
+2. claim a ready bead with `br update <id> --status in_progress`
 3. reserve exact files
 4. implement only that slice
-5. run the relevant quality gate
-6. sync Beads, commit, pull --rebase, push `main`, then push `main:master`
+5. run the relevant gate:
+   - docs-only: `git diff --check && ubs --diff`
+   - code: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ubs .`
+6. if `.beads/` changed, run `br sync --flush-only` and include the result in your normal git workflow
+7. close the bead, send the completion note, and release reservations

@@ -2,38 +2,61 @@
 
 **Deterministic constraint evaluation for the epistemic spine and factory runtime.**
 
-`verify` is the spine tool for checking declared constraints against one or more
-named relations and emitting a deterministic report of passes, failures, and
-refusals.
+`verify` evaluates declared constraints against one or more named relations and
+emits a deterministic report of passes, failures, and refusals.
 
 It answers one narrow question:
 
 **Do these declared constraints hold for these bound inputs?**
 
-Current status:
-
-- repository status: spec-complete, implementation not scaffolded yet
-- source of truth: [docs/plan.md](./docs/plan.md)
-- current repo contents: plan + Beads execution graph, not a released CLI yet
-
-The examples below describe the target `v0` contract. They are the
-implementation target, not a claim that a published binary exists today.
-
 ---
 
-## Current quickstart
+## Quickstart
 
-There is no installable `verify` binary yet. The current quickstart is for
-contributors and implementers:
+Build from source:
 
 ```bash
-cd verify
-sed -n '1,320p' docs/plan.md
-br ready
+cargo build --release -p verify-cli
+./target/release/verify --help
 ```
 
-If you are here to use the eventual CLI, read the contract below as the target
-surface. If you are here to build it, start with the plan and the Beads graph.
+Arity-1 shortcut (compile and evaluate in one step):
+
+```bash
+./target/release/verify fixtures/inputs/arity1/loans.csv \
+  --rules fixtures/authoring/arity1/not_null_loans.yaml \
+  --json
+```
+
+General batch path:
+
+```bash
+./target/release/verify run fixtures/constraints/query_rules/orphan_rows.verify.json \
+  --bind property=fixtures/inputs/arity_n/property_no_orphans.csv \
+  --bind tenants=fixtures/inputs/arity_n/tenants.csv \
+  --json
+```
+
+Compile authoring to a constraint artifact:
+
+```bash
+./target/release/verify compile fixtures/authoring/arity1/not_null_loans.yaml \
+  --out /tmp/not_null_loans.verify.json
+```
+
+Validate a compiled artifact:
+
+```bash
+./target/release/verify validate fixtures/constraints/arity1/not_null_loans.verify.json
+```
+
+Inspect the embedded schemas and local witness log:
+
+```bash
+./target/release/verify --schema > /tmp/verify.report.v1.schema.json
+./target/release/verify compile --schema > /tmp/verify.constraint.v1.schema.json
+./target/release/verify witness last --json
+```
 
 ---
 
@@ -45,10 +68,6 @@ The spine and factory both need the same constraint primitive:
 - one canonical report artifact
 - deterministic evaluation semantics
 - reusable execution across batch and embedded contexts
-
-Before `verify`, this need was split across old single-file validation framing,
-SQL-only cross-check language, and factory-local constraint talk. `verify`
-collapses that into one protocol.
 
 You provide:
 
@@ -71,13 +90,13 @@ You provide:
   validation are the same protocol with different arity.
 - **One compiled contract.** JSON/YAML authoring and SQL authoring both compile
   into `verify.constraint.v1`.
-- **Portable and batch-only rules are explicit.** Portable rules must mean the
-  same thing in batch and embedded execution. Batch-only query rules never
-  silently downgrade.
+- **Portable and batch-only rules are explicit.** Portable rules mean the same
+  thing in batch and embedded execution. Batch-only query rules never silently
+  downgrade.
 - **Failure localization is first-class.** Reports identify failing rules,
   implicated bindings, and when possible keys, rows, and fields.
 - **Deterministic reports.** Same compiled constraints plus same bound inputs
-  must yield the same ordered report bytes.
+  yield the same ordered report bytes.
 - **Clean spine boundaries.** `verify` checks declared constraints. It does not
   score correctness, choose winners, or make proceed/block decisions.
 
@@ -113,183 +132,9 @@ Related tools:
 
 ---
 
-## How verify compares
-
-| Capability | verify | `benchmark` | `rvl` | ad hoc SQL checks |
-|------------|--------|-------------|-------|-------------------|
-| Checks declared constraints | ✅ | ❌ | ❌ | ⚠️ inconsistent |
-| Emits localized failures | ✅ | ⚠️ gold-set misses only | ⚠️ diffs only | ⚠️ depends |
-| Works in batch and embedded modes | ✅ | ❌ | ❌ | ❌ |
-| Deterministic structured report | ✅ | ✅ | ✅ | ❌ |
-| Chooses winners or policy outcomes | ❌ | ❌ | ❌ | ❌ |
-
-Use `verify` when the question is "did the declared rules hold?" not "did the
-output match gold truth?" and not "what changed between old and new?"
-
----
-
-## What verify is not
-
-`verify` is not:
-
-- a benchmark scorer
-- a policy engine
-- a canonicalization system
-- an extraction pipeline
-- a storage/orchestration layer
-- a long-term provenance graph
-
-Fresh-eyes boundary that matters:
-
-- `verify` enforces constraints
-- `benchmark` scores correctness against ground truth
-- `assess` decides proceed / escalate / block
-
-If those blur together, the tool boundary is wrong.
-
----
-
-## Target v0 workflow
-
-Arity-1 shortcut:
-
-```bash
-verify tape.csv --rules rules.yaml --bind-key loan_id --json
-```
-
-General batch path:
-
-```bash
-verify run compiled.verify.json \
-  --bind loans=tape.csv \
-  --bind property=property.parquet \
-  --lock delivery.lock.json \
-  --json
-```
-
-Authoring compile path:
-
-```bash
-verify compile rules.yaml --output compiled.verify.json
-```
-
-Validation path:
-
-```bash
-verify validate compiled.verify.json
-```
-
----
-
-## Target compiled artifact
-
-`verify v0` centers on one compiled artifact family:
-
-```json
-{
-  "version": "verify.constraint.v1",
-  "rules": [
-    {
-      "id": "loans.not_null.loan_id",
-      "severity": "critical",
-      "portability": "portable",
-      "kind": "not_null",
-      "binding": "loans",
-      "field": "loan_id"
-    }
-  ],
-  "bindings": {
-    "loans": {
-      "source": "tape.csv",
-      "key_fields": ["loan_id"]
-    }
-  }
-}
-```
-
-Portable rule kinds in v0:
-
-- `unique`
-- `not_null`
-- `predicate`
-- `row_count`
-- `aggregate_compare`
-- `foreign_key`
-
-Explicit batch-only rule kind in v0:
-
-- `query_zero_rows`
-
-Important boundary:
-
-- SQL authoring is allowed
-- SQL authoring compiles into batch-only rules
-- embedded execution must refuse batch-only rules instead of approximating them
-
----
-
-## Target report contract
-
-Target JSON shape:
-
-```json
-{
-  "version": "verify.report.v1",
-  "tool": "verify",
-  "execution_mode": "batch",
-  "outcome": "FAIL",
-  "constraint_hash": "sha256:1a2b3c...",
-  "summary": {
-    "total_rules": 3,
-    "passed_rules": 2,
-    "failed_rules": 1,
-    "by_severity": {
-      "critical": 1,
-      "major": 0,
-      "minor": 0
-    }
-  },
-  "policy_signals": {
-    "severity_band": "critical"
-  },
-  "results": [
-    {
-      "rule_id": "loans.not_null.loan_id",
-      "status": "FAIL",
-      "severity": "critical",
-      "binding": "loans",
-      "field": "loan_id",
-      "violations": [
-        {
-          "key": {
-            "loan_id": "LN-42"
-          },
-          "field": "loan_id"
-        }
-      ]
-    }
-  ],
-  "input_verification": null,
-  "refusal": null
-}
-```
-
-Target human output:
-
-```text
-VERIFY FAIL
-rules: 3
-passed: 2
-failed: 1
-severity_band: critical
-top_failure: loans.not_null.loan_id
-```
-
----
-
 ## The three outcomes
 
-`verify` should emit exactly one domain outcome:
+`verify` emits exactly one domain outcome:
 
 | Exit | Outcome | Meaning |
 |------|---------|---------|
@@ -305,124 +150,234 @@ Outcome discipline:
 
 ---
 
+## Commands
+
+```text
+verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--no-witness]
+verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--no-witness]
+verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
+verify compile --schema
+verify validate <COMPILED_CONSTRAINTS> [--json]
+verify witness [ACTION] [--json]
+verify --schema
+verify --describe   # currently returns a scaffold refusal
+```
+
+---
+
+## Compiled constraint artifact
+
+`verify.constraint.v1` is the compiled artifact:
+
+```json
+{
+  "version": "verify.constraint.v1",
+  "constraint_set_id": "example.not_null_loans",
+  "bindings": [
+    {
+      "name": "input",
+      "kind": "relation",
+      "key_fields": ["loan_id"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "INPUT_LOAN_ID_PRESENT",
+      "severity": "error",
+      "portability": "portable",
+      "check": {
+        "op": "not_null",
+        "binding": "input",
+        "columns": ["loan_id"]
+      }
+    }
+  ]
+}
+```
+
+Portable rule ops:
+
+- `unique`
+- `not_null`
+- `predicate`
+- `row_count`
+- `aggregate_compare`
+- `foreign_key`
+
+Batch-only rule op:
+
+- `query_zero_rows`
+
+SQL authoring compiles into batch-only rules. Embedded execution refuses
+batch-only rules with explicit refusal semantics.
+
+---
+
+## Report contract
+
+JSON report shape (`verify.report.v1`):
+
+```json
+{
+  "tool": "verify",
+  "version": "verify.report.v1",
+  "execution_mode": "batch",
+  "outcome": "FAIL",
+  "constraint_set_id": "example.not_null_loans",
+  "constraint_hash": "sha256:...",
+  "bindings": {
+    "input": {
+      "kind": "relation",
+      "source": "tape.csv",
+      "content_hash": "sha256:...",
+      "input_verification": null
+    }
+  },
+  "summary": {
+    "total_rules": 1,
+    "passed_rules": 0,
+    "failed_rules": 1,
+    "by_severity": { "error": 1, "warn": 0 }
+  },
+  "policy_signals": {
+    "severity_band": "ERROR_PRESENT"
+  },
+  "results": [
+    {
+      "rule_id": "INPUT_LOAN_ID_PRESENT",
+      "severity": "error",
+      "status": "fail",
+      "violation_count": 1,
+      "affected": [
+        {
+          "binding": "input",
+          "key": { "loan_id": "LN-42" },
+          "field": "loan_id",
+          "value": null
+        }
+      ]
+    }
+  ],
+  "refusal": null
+}
+```
+
+Human output:
+
+```text
+VERIFY FAIL
+constraint_set: example.not_null_loans
+binding: input=tape.csv
+passed_rules: 0
+failed_rules: 1
+severity_band: ERROR_PRESENT
+
+FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=null
+```
+
+---
+
 ## Execution contexts
 
-This is one primitive with two execution contexts:
+One primitive with two execution contexts:
 
 ### Batch / CLI
 
-- reads bound inputs from disk
-- can evaluate portable and batch-only rules
+- reads bound inputs from disk (CSV, row-oriented JSON, JSONL, and Parquet)
+- evaluates portable and batch-only rules
 - can verify bound inputs against lockfiles
 - is the reference executor
 
 ### Embedded / runtime
 
 - receives already-materialized named relations
-- can evaluate portable rules only
-- must refuse batch-only rules with explicit refusal semantics
-- exists to support factory-time constraint enforcement, not winner selection
+- evaluates portable rules only
+- refuses batch-only rules with explicit refusal semantics
+- exists to support factory-time constraint enforcement
 
 The report contract stays the same across both.
 
 ---
 
-## Supported v0 input discipline
-
-Planned supported batch binding formats:
-
-| Format | Status in v0 |
-|--------|--------------|
-| CSV | supported target |
-| JSON | supported target if row-oriented |
-| JSONL | supported target |
-| Parquet | supported target |
-| nested / document-shaped JSON | out of scope for v0 |
-
-Important non-goals:
-
-- no arbitrary backend plugins
-- no heuristic flattening of nested document structures
-- no silent format guessing when extension-based detection is ambiguous
-
----
-
-## Lock and witness participation
-
-`verify` participates in two spine evidence surfaces:
-
-- **lock**: optional trusted-input verification before evaluation
-- **witness**: local run receipt logging only
-
-Important boundary:
-
-- `lock` and `pack` remain portable evidence artifacts
-- `witness` is supplemental local context only
-- `verify` should not invent its own provenance system
-
----
-
-## Planned repository shape
-
-Target implementation layout:
+## Repository layout
 
 ```text
 verify/
-├── docs/
-│   ├── plan.md
-│   └── PLAN_VERIFY.md
+├── .github/workflows/
+│   ├── ci.yml
+│   └── release.yml
+├── crates/
+│   ├── verify-core/        # domain types: constraint, report, refusal, ordering
+│   ├── verify-engine/      # portable rule evaluation + embedded executor
+│   ├── verify-duckdb/      # batch bindings, query_zero_rows, lock verification
+│   └── verify-cli/         # CLI surface: run, compile, validate, witness, render
+├── fixtures/
+│   ├── authoring/          # YAML and SQL authoring fixtures
+│   ├── constraints/        # compiled constraint artifacts
+│   ├── inputs/             # CSV test datasets
+│   ├── locks/              # lock file fixtures
+│   └── reports/            # reference report fixtures
 ├── schemas/
 │   ├── verify.constraint.v1.schema.json
 │   └── verify.report.v1.schema.json
-├── fixtures/
-│   ├── authoring/
-│   ├── constraints/
-│   ├── inputs/
-│   ├── locks/
-│   └── reports/
-├── crates/
-│   ├── verify-core/
-│   ├── verify-engine/
-│   ├── verify-duckdb/
-│   └── verify-cli/
+├── scripts/
+│   └── ubs_gate.sh
 ├── tests/
-│   ├── schema_contract.rs
-│   ├── portable_rules.rs
-│   ├── query_rules.rs
-│   ├── refusals.rs
-│   ├── lock_integration.rs
-│   ├── cli.rs
-│   ├── embedding_equivalence.rs
-│   └── determinism.rs
-└── Cargo.toml
+│   ├── cli.rs              # CLI exit/output integration tests
+│   ├── determinism.rs      # byte-identical report determinism proof
+│   ├── embedding_equivalence.rs  # batch/embedded parity
+│   ├── lock_integration.rs # lock verification tests
+│   ├── portable_rules.rs   # full compile→bind→evaluate pipeline
+│   ├── query_rules.rs      # query_zero_rows localization tests
+│   ├── refusals.rs         # refusal path coverage
+│   ├── schema_contract.rs  # fixture/schema round-trip validation
+│   ├── gen_fixtures.rs     # deterministic fixture generators
+│   └── perf_smoke.rs       # performance guardrail tests
+├── Cargo.toml
+└── LICENSE
 ```
-
-The first implementation bead creates this skeleton so later agents can work in
-parallel without fighting over structure.
 
 ---
 
-## Contributing right now
+## What verify is not
 
-Until the crate lands, the useful work in this repo is:
+`verify` is not:
 
-- tightening the plan in [docs/plan.md](./docs/plan.md)
-- improving the execution graph in [.beads/issues.jsonl](./.beads/issues.jsonl)
-- keeping future-facing docs aligned with the actual implementation target
+- a benchmark scorer
+- a policy engine
+- a canonicalization system
+- an extraction pipeline
+- a storage/orchestration layer
 
-Contributor loop:
+Fresh-eyes boundary:
 
-```bash
-cd verify
-br ready
-br show bd-3fq
-```
+- `verify` enforces constraints
+- `benchmark` scores correctness against ground truth
+- `assess` decides proceed / escalate / block
 
-When code lands, the standard Rust gate will apply:
+---
+
+## Quality gates
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test
+cargo test --workspace
 ubs .
+```
+
+---
+
+## Contributing
+
+```bash
+cd verify
+br ready                          # find available work
+bv -robot-alerts -alert-type stale_issue
+bv -robot-alerts -alert-type blocking_cascade
+br show <bead-id>                 # read the spec
+br update <id> --status in_progress
+# reserve only exact files, implement, and run the relevant gate
+br close <id> --reason "Completed"
+br sync --flush-only              # non-invasive; stage .beads/ in normal git workflow
 ```

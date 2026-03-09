@@ -80,11 +80,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --locked --package verify-cli --bin verify --target ${{ matrix.target }}
+        run: cross build -p verify-cli --release --locked --target ${{ matrix.target }}
 
       - name: Build (cargo)
         if: matrix.use_cross == false
-        run: cargo build --release --locked --package verify-cli --bin verify --target ${{ matrix.target }}
+        run: cargo build -p verify-cli --release --locked --target ${{ matrix.target }}
 
       - name: Strip binary (linux)
         if: matrix.strip == 'linux'
@@ -214,13 +214,8 @@ jobs:
 
       - name: Generate SBOM
         run: |
-          cargo cyclonedx --manifest-path crates/verify-cli/Cargo.toml --format json --override-filename sbom.cdx
-          sbom_path="$(find crates/verify-cli -name 'sbom.cdx.json' -print -quit)"
-          if [ -z "$sbom_path" ]; then
-            echo "cargo-cyclonedx did not produce crates/verify-cli/sbom.cdx.json"
-            exit 1
-          fi
-          mv "$sbom_path" dist/sbom.cdx.json
+          cargo cyclonedx -p verify-cli --format json --override-filename sbom.cdx
+          mv sbom.cdx.json dist/sbom.cdx.json
 
       - name: Generate provenance
         run: |
@@ -360,11 +355,12 @@ jobs:
               blocks.append("    end")
           blocks.append("  end")
 
-          formula = f'''# typed: false
+          formula = textwrap.dedent(f'''\
+          # typed: false
           # frozen_string_literal: true
 
           class Verify < Formula
-            desc "Deterministic constraint evaluation for the epistemic spine and factory runtime"
+            desc "Deterministic constraint evaluation for the epistemic spine"
             homepage "https://github.com/cmdrvl/verify"
             version "{bare}"
             license "MIT"
@@ -378,9 +374,8 @@ jobs:
               assert_match version.to_s, shell_output("#{{bin}}/verify --version")
             end
           end
-          '''
+          ''').lstrip()
 
-          formula = textwrap.dedent(formula).lstrip()
           pathlib.Path("verify.rb").write_text(formula)
           PYEOF
 
