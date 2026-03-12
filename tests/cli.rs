@@ -85,7 +85,7 @@ fn version_output_uses_package_version() {
         .expect("version command should run");
 
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("0.1.0"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(env!("CARGO_PKG_VERSION")));
     assert!(output.stderr.is_empty());
 }
 
