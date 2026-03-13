@@ -177,12 +177,13 @@ Output modes:
 
 - default stdout: compact human-readable report
 - `--json`: machine-readable full `verify.report.v1`
+- `--sample-affected <N>`: limit human output to the first `N` localized affected entries per failing rule
 - stderr: process diagnostics only
 
 Command family:
 
-- `verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--no-witness]`
-- `verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--no-witness]`
+- `verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]`
+- `verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]`
 - `verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]`
 - `verify compile --schema`
 - `verify validate <COMPILED_CONSTRAINTS> [--json]`

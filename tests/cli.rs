@@ -78,6 +78,19 @@ fn help_output_lists_primary_run_surface() {
 }
 
 #[test]
+fn run_help_mentions_sample_affected() {
+    let output = verify_command()
+        .args(["run", "--help"])
+        .output()
+        .expect("run help command should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--sample-affected"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn version_output_uses_package_version() {
     let output = verify_command()
         .arg("--version")
@@ -340,6 +353,37 @@ fn run_fail_with_missing_ids_exits_one() {
     assert!(stdout.contains("VERIFY FAIL"));
     assert!(stdout.contains("failed_rules: 1"));
     assert!(stdout.contains("FAIL INPUT_LOAN_ID_PRESENT"));
+}
+
+#[test]
+fn run_fail_with_sample_affected_renders_localized_preview() {
+    let constraints = fixture("fixtures/constraints/arity1/not_null_loans.verify.json");
+    let bind = format!(
+        "input={}",
+        fixture("fixtures/inputs/arity1/loans_missing_id.csv")
+    );
+    let output = verify_command()
+        .args([
+            "run",
+            &constraints,
+            "--bind",
+            &bind,
+            "--sample-affected",
+            "1",
+            "--no-witness",
+        ])
+        .output()
+        .expect("run fail command with sample preview should run");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("VERIFY FAIL"));
+    assert!(
+        stdout
+            .contains("FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id= field=loan_id value=")
+    );
 }
 
 #[test]
@@ -680,6 +724,39 @@ fn run_query_rules_json_fail_has_localization() {
     assert_eq!(affected["field"], "tenant_id");
     assert_eq!(affected["value"], "T-999");
     assert!(affected["key"]["property_id"].as_str().is_some());
+}
+
+#[test]
+fn run_query_rules_human_sample_preview_shows_binding_key_field_and_value() {
+    let constraints = fixture("fixtures/constraints/query_rules/orphan_rows.verify.json");
+    let bind_property = format!(
+        "property={}",
+        fixture("fixtures/inputs/arity_n/property.csv")
+    );
+    let bind_tenants = format!("tenants={}", fixture("fixtures/inputs/arity_n/tenants.csv"));
+    let output = verify_command()
+        .args([
+            "run",
+            &constraints,
+            "--bind",
+            &bind_property,
+            "--bind",
+            &bind_tenants,
+            "--sample-affected",
+            "1",
+            "--no-witness",
+        ])
+        .output()
+        .expect("query rules human preview command should run");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("VERIFY FAIL"));
+    assert!(stdout.contains(
+        "FAIL ORPHAN_PROPERTY_TENANT binding=property key.property_id=P-003 field=tenant_id value=T-999"
+    ));
 }
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ pub struct CommonRunArgs {
     pub max_bytes: Option<u64>,
     #[arg(long)]
     pub json: bool,
+    #[arg(long, value_name = "N", value_parser = parse_sample_affected)]
+    pub sample_affected: Option<usize>,
     #[arg(long)]
     pub no_witness: bool,
 }
@@ -88,6 +90,17 @@ pub struct RunCommandResult {
     pub stderr: Option<String>,
 }
 
+fn parse_sample_affected(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("invalid value for --sample-affected: {raw}"))?;
+    if value == 0 {
+        Err("--sample-affected must be at least 1".to_owned())
+    } else {
+        Ok(value)
+    }
+}
+
 impl RunCommandResult {
     pub fn refusal(report: VerifyReport, json_output: bool) -> Self {
         let rendered =
@@ -131,14 +144,14 @@ impl RunCommandResult {
 
 pub fn execute(args: RunArgs) -> RunCommandResult {
     let report = run_batch(&args);
-    let mut result = report_to_result(report, args.common.json);
+    let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_run(&args, &mut result);
     result
 }
 
 pub fn execute_shortcut(args: ShortcutArgs) -> RunCommandResult {
     let report = run_shortcut(&args);
-    let mut result = report_to_result(report, args.common.json);
+    let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_shortcut(&args, &mut result);
     result
 }
@@ -476,7 +489,11 @@ fn duckdb_value_to_json(value: duckdb::types::Value) -> Value {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn report_to_result(report: VerifyReport, json: bool) -> RunCommandResult {
+fn report_to_result(
+    report: VerifyReport,
+    json: bool,
+    sample_affected: Option<usize>,
+) -> RunCommandResult {
     match report.outcome {
         Outcome::Refusal => RunCommandResult::refusal(report, json),
         _ => {
@@ -485,7 +502,7 @@ fn report_to_result(report: VerifyReport, json: bool) -> RunCommandResult {
             } else {
                 RunExit::Fail
             };
-            let rendered = crate::render::render_report(&report, json);
+            let rendered = crate::render::render_report(&report, json, sample_affected);
             RunCommandResult {
                 exit,
                 stdout: Some(rendered),

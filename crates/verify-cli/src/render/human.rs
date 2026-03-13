@@ -24,14 +24,14 @@ pub fn scaffold_message(surface: &str) -> String {
 ///
 /// FAIL POSITIVE_BALANCE binding=input key.loan_id=LN-00421 field=balance value=-500.0
 /// ```
-pub fn render_report(report: &VerifyReport) -> String {
+pub fn render_report(report: &VerifyReport, sample_affected: Option<usize>) -> String {
     match report.outcome {
         Outcome::Refusal => render_refusal(report),
-        _ => render_pass_or_fail(report),
+        _ => render_pass_or_fail(report, sample_affected),
     }
 }
 
-fn render_pass_or_fail(report: &VerifyReport) -> String {
+fn render_pass_or_fail(report: &VerifyReport, sample_affected: Option<usize>) -> String {
     let mut out = String::new();
 
     // Header line
@@ -67,7 +67,7 @@ fn render_pass_or_fail(report: &VerifyReport) -> String {
             if result.affected.is_empty() {
                 writeln!(out, "FAIL {}", result.rule_id).unwrap();
             } else {
-                for affected in &result.affected {
+                for affected in affected_preview(&result.affected, sample_affected) {
                     let mut detail =
                         format!("FAIL {} binding={}", result.rule_id, affected.binding);
 
@@ -87,6 +87,23 @@ fn render_pass_or_fail(report: &VerifyReport) -> String {
 
                     writeln!(out, "{detail}").unwrap();
                 }
+
+                if let Some(limit) = sample_affected {
+                    let remaining = result.affected.len().saturating_sub(limit);
+                    if remaining > 0 {
+                        let noun = if remaining == 1 {
+                            "affected entry"
+                        } else {
+                            "affected entries"
+                        };
+                        writeln!(
+                            out,
+                            "preview: {remaining} more {noun} not shown for {}",
+                            result.rule_id
+                        )
+                        .unwrap();
+                    }
+                }
             }
         }
     }
@@ -97,6 +114,19 @@ fn render_pass_or_fail(report: &VerifyReport) -> String {
     }
 
     out
+}
+
+fn affected_preview(
+    affected: &[verify_core::report::AffectedEntry],
+    sample_affected: Option<usize>,
+) -> &[verify_core::report::AffectedEntry] {
+    match sample_affected {
+        Some(limit) => {
+            let end = affected.len().min(limit);
+            &affected[..end]
+        }
+        None => affected,
+    }
 }
 
 fn render_refusal(report: &VerifyReport) -> String {
@@ -259,7 +289,7 @@ mod tests {
 
     #[test]
     fn pass_report_renders_clean_summary() {
-        let rendered = render_report(&pass_report());
+        let rendered = render_report(&pass_report(), None);
 
         assert!(rendered.starts_with("VERIFY PASS\n"));
         assert!(rendered.contains("constraint_set: loan_tape.monthly.v1"));
@@ -273,7 +303,7 @@ mod tests {
 
     #[test]
     fn fail_report_renders_localized_violations() {
-        let rendered = render_report(&fail_report());
+        let rendered = render_report(&fail_report(), None);
 
         assert!(rendered.starts_with("VERIFY FAIL\n"));
         assert!(rendered.contains("constraint_set: loan_tape.monthly.v1"));
@@ -289,7 +319,7 @@ mod tests {
 
     #[test]
     fn fail_report_matches_plan_format() {
-        let rendered = render_report(&fail_report());
+        let rendered = render_report(&fail_report(), None);
         let lines: Vec<&str> = rendered.lines().collect();
 
         assert_eq!(lines[0], "VERIFY FAIL");
@@ -313,7 +343,7 @@ mod tests {
             json!({"binding": "property"}),
         );
 
-        let rendered = render_report(&report);
+        let rendered = render_report(&report, None);
 
         assert!(rendered.starts_with("VERIFY REFUSAL\n"));
         assert!(rendered.contains("E_MISSING_BINDING:"));
@@ -348,7 +378,7 @@ mod tests {
             ..pass_report()
         };
 
-        let rendered = render_report(&report);
+        let rendered = render_report(&report, None);
         assert!(rendered.contains("binding: property=property.csv"));
         assert!(rendered.contains("binding: tenants=tenants.csv"));
     }
@@ -389,12 +419,108 @@ mod tests {
             ..pass_report()
         };
 
-        let rendered = render_report(&report);
+        let rendered = render_report(&report, None);
         let fail_lines: Vec<&str> = rendered
             .lines()
             .filter(|l| l.starts_with("FAIL "))
             .collect();
         assert_eq!(fail_lines.len(), 2);
+    }
+
+    #[test]
+    fn sample_affected_limits_preview_and_preserves_localization_shapes() {
+        let report = VerifyReport {
+            outcome: Outcome::Fail,
+            summary: Summary {
+                total_rules: 4,
+                passed_rules: 0,
+                failed_rules: 4,
+                by_severity: SeveritySummary { error: 4, warn: 0 },
+            },
+            policy_signals: PolicySignals {
+                severity_band: SeverityBand::ErrorPresent,
+            },
+            results: vec![
+                RuleResult {
+                    rule_id: "UNIQUE_LOAN_ID".to_owned(),
+                    severity: Severity::Error,
+                    status: ResultStatus::Fail,
+                    violation_count: 2,
+                    affected: vec![
+                        AffectedEntry {
+                            binding: "input".to_owned(),
+                            key: Some(BTreeMap::from([("row".to_owned(), json!(1))])),
+                            field: Some("loan_id".to_owned()),
+                            value: Some(json!("LN-100")),
+                        },
+                        AffectedEntry {
+                            binding: "input".to_owned(),
+                            key: Some(BTreeMap::from([("row".to_owned(), json!(3))])),
+                            field: Some("loan_id".to_owned()),
+                            value: Some(json!("LN-100")),
+                        },
+                    ],
+                },
+                RuleResult {
+                    rule_id: "INPUT_LOAN_ID_PRESENT".to_owned(),
+                    severity: Severity::Error,
+                    status: ResultStatus::Fail,
+                    violation_count: 1,
+                    affected: vec![AffectedEntry {
+                        binding: "input".to_owned(),
+                        key: Some(BTreeMap::from([("loan_id".to_owned(), json!("LN-42"))])),
+                        field: Some("loan_id".to_owned()),
+                        value: Some(json!(null)),
+                    }],
+                },
+                RuleResult {
+                    rule_id: "POSITIVE_BALANCE".to_owned(),
+                    severity: Severity::Error,
+                    status: ResultStatus::Fail,
+                    violation_count: 1,
+                    affected: vec![AffectedEntry {
+                        binding: "input".to_owned(),
+                        key: Some(BTreeMap::from([("loan_id".to_owned(), json!("LN-55"))])),
+                        field: Some("balance".to_owned()),
+                        value: Some(json!(-500.0)),
+                    }],
+                },
+                RuleResult {
+                    rule_id: "NO_ORPHAN_TENANTS".to_owned(),
+                    severity: Severity::Error,
+                    status: ResultStatus::Fail,
+                    violation_count: 1,
+                    affected: vec![AffectedEntry {
+                        binding: "property".to_owned(),
+                        key: Some(BTreeMap::from([("property_id".to_owned(), json!("P-1"))])),
+                        field: None,
+                        value: Some(json!("T-999")),
+                    }],
+                },
+            ],
+            ..pass_report()
+        };
+
+        let rendered = render_report(&report, Some(1));
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert!(lines.iter().any(|line| {
+            *line == "FAIL UNIQUE_LOAN_ID binding=input key.row=1 field=loan_id value=LN-100"
+        }));
+        assert!(lines.iter().any(|line| {
+            *line == "preview: 1 more affected entry not shown for UNIQUE_LOAN_ID"
+        }));
+        assert!(lines.iter().any(|line| {
+            *line
+                == "FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=null"
+        }));
+        assert!(lines.iter().any(|line| {
+            *line
+                == "FAIL POSITIVE_BALANCE binding=input key.loan_id=LN-55 field=balance value=-500.0"
+        }));
+        assert!(lines.iter().any(|line| {
+            *line == "FAIL NO_ORPHAN_TENANTS binding=property key.property_id=P-1 value=T-999"
+        }));
     }
 
     #[test]

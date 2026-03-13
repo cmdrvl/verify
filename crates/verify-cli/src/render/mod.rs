@@ -16,11 +16,15 @@ pub fn scaffold_message(surface: &str, json_output: bool) -> String {
 }
 
 /// Render a `VerifyReport` as either JSON or compact human text.
-pub fn render_report(report: &VerifyReport, json_output: bool) -> String {
+pub fn render_report(
+    report: &VerifyReport,
+    json_output: bool,
+    sample_affected: Option<usize>,
+) -> String {
     if json_output {
         json::render_report(report)
     } else {
-        human::render_report(report)
+        human::render_report(report, sample_affected)
     }
 }
 
@@ -59,7 +63,7 @@ mod tests {
     #[test]
     fn render_report_json_mode_produces_json() {
         let report = VerifyReport::new(ExecutionMode::Batch, "test.constraint", "sha256:test");
-        let rendered = render_report(&report, true);
+        let rendered = render_report(&report, true, None);
         assert!(rendered.starts_with('{'));
         assert!(rendered.contains("\"outcome\": \"PASS\""));
     }
@@ -67,7 +71,7 @@ mod tests {
     #[test]
     fn render_report_human_mode_produces_text() {
         let report = VerifyReport::new(ExecutionMode::Batch, "test.constraint", "sha256:test");
-        let rendered = render_report(&report, false);
+        let rendered = render_report(&report, false, None);
         assert!(rendered.starts_with("VERIFY PASS"));
         assert!(rendered.contains("constraint_set: test.constraint"));
     }

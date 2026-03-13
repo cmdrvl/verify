@@ -37,6 +37,15 @@ General batch path:
   --json
 ```
 
+Preview the first few localized failures directly in human output:
+
+```bash
+./target/release/verify run fixtures/constraints/query_rules/orphan_rows.verify.json \
+  --bind property=fixtures/inputs/arity_n/property.csv \
+  --bind tenants=fixtures/inputs/arity_n/tenants.csv \
+  --sample-affected 3
+```
+
 Compile authoring to a constraint artifact:
 
 ```bash
@@ -153,8 +162,8 @@ Outcome discipline:
 ## Commands
 
 ```text
-verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--no-witness]
-verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--no-witness]
+verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]
+verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]
 verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
 verify compile --schema
 verify validate <COMPILED_CONSTRAINTS> [--json]
@@ -274,6 +283,8 @@ severity_band: ERROR_PRESENT
 
 FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=null
 ```
+
+When a failing rule has many localized rows, `--sample-affected <N>` limits the human output to the first `N` affected entries per failing rule and adds a preview note when additional entries were omitted. JSON output is unchanged.
 
 ---
 
