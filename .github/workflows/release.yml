@@ -3,8 +3,8 @@ name: Release Build Matrix
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
-    paths: ["Cargo.toml"]
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -384,8 +384,8 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "${GH_TOKEN}" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not configured for this repository."
-            exit 1
+            echo "HOMEBREW_TAP_TOKEN is not configured for this repository; skipping Homebrew tap update."
+            exit 0
           fi
           git clone "https://x-access-token:${GH_TOKEN}@github.com/cmdrvl/homebrew-tap.git" tap
           cp verify.rb tap/Formula/verify.rb
