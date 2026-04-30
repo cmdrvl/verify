@@ -1,0 +1,77 @@
+schema_version: 1
+policy_id: loan_tape.monthly.v1
+policy_version: 1
+description: Monthly loan tape reconciliation policy
+requires:
+  - shape
+  - rvl
+  - verify
+rules:
+  - name: clean_reconciliation
+    when:
+      shape:
+        outcome: COMPATIBLE
+      rvl:
+        outcome_in:
+          - REAL_CHANGE
+          - NO_REAL_CHANGE
+      verify:
+        outcome: PASS
+    then:
+      decision_band: PROCEED
+
+  - name: partial_overlap_acceptable
+    when:
+      shape:
+        outcome: INCOMPATIBLE
+        signals:
+          compatibility_band: PARTIAL
+      rvl:
+        outcome_in:
+          - REAL_CHANGE
+          - NO_REAL_CHANGE
+      verify:
+        outcome: PASS
+    then:
+      decision_band: PROCEED_WITH_RISK
+      risk_code: PARTIAL_SCHEMA_OVERLAP
+
+  - name: diffuse_requires_review
+    when:
+      shape:
+        outcome: COMPATIBLE
+      rvl:
+        refusal: E_DIFFUSE
+      verify:
+        outcome: PASS
+    then:
+      decision_band: ESCALATE
+      risk_code: DIFFUSE_CHANGE
+
+  - name: tolerable_missingness
+    when:
+      shape:
+        outcome: COMPATIBLE
+      rvl:
+        refusal: E_MISSINGNESS
+        signals:
+          missingness_band: TOLERABLE
+      verify:
+        outcome: PASS
+    then:
+      decision_band: PROCEED_WITH_RISK
+      risk_code: MISSINGNESS_TOLERATED
+
+  - name: verify_fail_requires_review
+    when:
+      verify:
+        outcome: FAIL
+    then:
+      decision_band: ESCALATE
+      risk_code: VERIFY_FAIL
+
+  - name: default_block
+    default: true
+    then:
+      decision_band: BLOCK
+      risk_code: UNHANDLED_CONDITION

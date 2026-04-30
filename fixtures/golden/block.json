@@ -1,0 +1,35 @@
+{
+  "tool": "assess",
+  "version": "assess.v0",
+  "decision_band": "BLOCK",
+  "policy": {
+    "id": "minimal.default.only.v1",
+    "version": 1,
+    "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "matched_rule": "default_block",
+  "required_tools": [],
+  "observed_tools": [
+    "benchmark"
+  ],
+  "risk_factors": [
+    {
+      "code": "UNHANDLED_CONDITION",
+      "source_tool": "assess",
+      "detail": "no explicit rule matched the provided artifact bundle"
+    }
+  ],
+  "epistemic_basis": [
+    {
+      "artifact": "benchmark_low.json",
+      "tool": "benchmark",
+      "version": "benchmark.v0",
+      "outcome": "PASS",
+      "policy_signals": {
+        "quality_band": "LOW"
+      },
+      "refusal": null
+    }
+  ],
+  "refusal": null
+}

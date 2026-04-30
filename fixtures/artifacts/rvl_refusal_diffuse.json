@@ -1,0 +1,10 @@
+{
+  "tool": "rvl",
+  "version": "rvl.v0",
+  "outcome": null,
+  "policy_signals": {},
+  "refusal": {
+    "code": "E_DIFFUSE",
+    "message": "rvl refused because the change set was too diffuse for deterministic localization"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "tool": "assess",
+  "version": "assess.v0",
+  "decision_band": "ESCALATE",
+  "policy": {
+    "id": "loan_tape.monthly.v1",
+    "version": 1,
+    "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "matched_rule": "diffuse_requires_review",
+  "required_tools": [
+    "shape",
+    "rvl",
+    "verify"
+  ],
+  "observed_tools": [
+    "shape",
+    "rvl",
+    "verify"
+  ],
+  "risk_factors": [
+    {
+      "code": "DIFFUSE_CHANGE",
+      "source_tool": "rvl",
+      "detail": "rvl refused with E_DIFFUSE; human review required"
+    }
+  ],
+  "epistemic_basis": [
+    {
+      "artifact": "shape_compatible.json",
+      "tool": "shape",
+      "version": "shape.v0",
+      "outcome": "COMPATIBLE",
+      "policy_signals": {
+        "compatibility_band": "FULL"
+      },
+      "refusal": null
+    },
+    {
+      "artifact": "rvl_refusal_diffuse.json",
+      "tool": "rvl",
+      "version": "rvl.v0",
+      "outcome": null,
+      "policy_signals": {},
+      "refusal": {
+        "code": "E_DIFFUSE"
+      }
+    },
+    {
+      "artifact": "verify_pass.json",
+      "tool": "verify",
+      "version": "verify.report.v1",
+      "outcome": "PASS",
+      "policy_signals": {
+        "severity_band": "CLEAN"
+      },
+      "refusal": null
+    }
+  ],
+  "refusal": null
+}

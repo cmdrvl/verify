@@ -1,0 +1,27 @@
+{
+  "project": "/Users/zac/Source/cmdrvl/verify",
+  "timestamp": "2026-03-10T00:17:29Z",
+  "scanners": [
+    {
+      "language": "rust",
+      "project": "/Users/zac/Source/cmdrvl/verify",
+      "files": 25,
+      "critical": 0,
+      "warning": 576,
+      "info": 385,
+      "timestamp": "2026-03-10T00:17:29Z"
+    }
+  ],
+  "totals": {
+    "critical": 0,
+    "warning": 576,
+    "info": 385,
+    "files": 25
+  },
+  "generated_at": "2026-03-10T00:17:29Z",
+  "git": {
+    "repository": "https://github.com/cmdrvl/verify",
+    "commit": "e75538424b57e8be85122eff272d27c569ea2a84",
+    "blob_base": "https://github.com/cmdrvl/verify/blob/e75538424b57e8be85122eff272d27c569ea2a84"
+  }
+}

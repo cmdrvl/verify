@@ -1,0 +1,53 @@
+{
+  "tool": "assess",
+  "version": "assess.v0",
+  "decision_band": "PROCEED",
+  "policy": {
+    "id": "loan_tape.monthly.v1",
+    "version": 1,
+    "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "matched_rule": "clean_reconciliation",
+  "required_tools": [
+    "shape",
+    "rvl",
+    "verify"
+  ],
+  "observed_tools": [
+    "shape",
+    "rvl",
+    "verify"
+  ],
+  "risk_factors": [],
+  "epistemic_basis": [
+    {
+      "artifact": "shape_compatible.json",
+      "tool": "shape",
+      "version": "shape.v0",
+      "outcome": "COMPATIBLE",
+      "policy_signals": {
+        "compatibility_band": "FULL"
+      },
+      "refusal": null
+    },
+    {
+      "artifact": "rvl_real_change.json",
+      "tool": "rvl",
+      "version": "rvl.v0",
+      "outcome": "REAL_CHANGE",
+      "policy_signals": {},
+      "refusal": null
+    },
+    {
+      "artifact": "verify_pass.json",
+      "tool": "verify",
+      "version": "verify.report.v1",
+      "outcome": "PASS",
+      "policy_signals": {
+        "severity_band": "CLEAN"
+      },
+      "refusal": null
+    }
+  ],
+  "refusal": null
+}

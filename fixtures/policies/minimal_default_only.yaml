@@ -1,0 +1,11 @@
+schema_version: 1
+policy_id: minimal.default.only.v1
+policy_version: 1
+description: Minimal default-only catch-all policy
+requires: []
+rules:
+  - name: default_block
+    default: true
+    then:
+      decision_band: BLOCK
+      risk_code: UNHANDLED_CONDITION

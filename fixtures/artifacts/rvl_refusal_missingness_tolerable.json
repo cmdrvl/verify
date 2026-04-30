@@ -1,0 +1,12 @@
+{
+  "tool": "rvl",
+  "version": "rvl.v0",
+  "outcome": null,
+  "policy_signals": {
+    "missingness_band": "TOLERABLE"
+  },
+  "refusal": {
+    "code": "E_MISSINGNESS",
+    "message": "rvl refused because missingness exceeded exact-comparison tolerance before policy banding"
+  }
+}

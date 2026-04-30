@@ -1,0 +1,8 @@
+{
+  "tool": "benchmark",
+  "version": "benchmark.v0",
+  "outcome": "PASS",
+  "policy_signals": {
+    "quality_band": "LOW"
+  }
+}
