@@ -16,6 +16,10 @@ name = "cli"
 path = "../../tests/cli.rs"
 
 [[test]]
+name = "doctor"
+path = "../../tests/doctor.rs"
+
+[[test]]
 name = "perf_smoke"
 path = "../../tests/perf_smoke.rs"
 

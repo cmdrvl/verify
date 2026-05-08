@@ -67,6 +67,15 @@ Inspect the embedded schemas and local witness log:
 ./target/release/verify witness last --json
 ```
 
+Inspect the read-only doctor surface for agents and automation:
+
+```bash
+./target/release/verify doctor health
+./target/release/verify doctor capabilities --json
+./target/release/verify doctor robot-docs
+./target/release/verify doctor --robot-triage
+```
+
 ---
 
 ## Why verify exists
@@ -168,9 +177,17 @@ verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
 verify compile --schema
 verify validate <COMPILED_CONSTRAINTS> [--json]
 verify witness [ACTION] [--json]
+verify doctor health [--json]
+verify doctor capabilities --json
+verify doctor robot-docs
+verify doctor --robot-triage
 verify --schema
 verify --describe   # currently returns a scaffold refusal
 ```
+
+The doctor surface is read-only. It does not read bound inputs, execute rules,
+load DuckDB, write output artifacts, append witness records, create witness
+directories, or expose `doctor --fix`.
 
 ---
 
@@ -321,7 +338,7 @@ verify/
 │   ├── verify-core/        # domain types: constraint, report, refusal, ordering
 │   ├── verify-engine/      # portable rule evaluation + embedded executor
 │   ├── verify-duckdb/      # batch bindings, query_zero_rows, lock verification
-│   └── verify-cli/         # CLI surface: run, compile, validate, witness, render
+│   └── verify-cli/         # CLI surface: run, compile, validate, witness, doctor, render
 ├── fixtures/
 │   ├── authoring/          # YAML and SQL authoring fixtures
 │   ├── constraints/        # compiled constraint artifacts

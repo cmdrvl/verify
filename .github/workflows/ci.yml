@@ -47,6 +47,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test
+      - name: Smoke doctor surface
+        run: |
+          cargo run --locked -p verify-cli -- doctor health
+          cargo run --locked -p verify-cli -- doctor capabilities --json
+          cargo run --locked -p verify-cli -- doctor robot-docs
+          cargo run --locked -p verify-cli -- doctor --robot-triage
 
   ubs:
     name: UBS (critical-only)
@@ -104,9 +110,17 @@ jobs:
           if [ "$RUNNER_OS" != "Windows" ]; then
             ./target/release/verify --version
             ./target/release/verify --help || true
+            ./target/release/verify doctor health
+            ./target/release/verify doctor capabilities --json
+            ./target/release/verify doctor robot-docs
+            ./target/release/verify doctor --robot-triage
           else
             ./target/release/verify.exe --version
             ./target/release/verify.exe --help || true
+            ./target/release/verify.exe doctor health
+            ./target/release/verify.exe doctor capabilities --json
+            ./target/release/verify.exe doctor robot-docs
+            ./target/release/verify.exe doctor --robot-triage
           fi
         shell: bash
 

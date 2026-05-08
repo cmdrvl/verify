@@ -86,6 +86,21 @@ jobs:
         if: matrix.use_cross == false
         run: cargo build -p verify-cli --release --locked --target ${{ matrix.target }}
 
+      - name: Smoke native doctor surface
+        if: matrix.use_cross == false
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            bin="target/${{ matrix.target }}/release/verify"
+          else
+            bin="target/${{ matrix.target }}/release/verify.exe"
+          fi
+          "$bin" --version
+          "$bin" doctor health
+          "$bin" doctor capabilities --json
+          "$bin" doctor robot-docs
+          "$bin" doctor --robot-triage
+
       - name: Strip binary (linux)
         if: matrix.strip == 'linux'
         run: |
@@ -372,6 +387,7 @@ jobs:
 
             test do
               assert_match version.to_s, shell_output("#{{bin}}/verify --version")
+              assert_match "verify doctor health: healthy", shell_output("#{{bin}}/verify doctor health")
             end
           end
           ''').lstrip()

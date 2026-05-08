@@ -3,6 +3,7 @@
 use std::{ffi::OsString, process::ExitCode};
 
 mod compile;
+mod doctor;
 mod render;
 #[allow(clippy::result_large_err)]
 mod run;
@@ -33,6 +34,7 @@ enum Command {
     Compile(compile::CompileArgs),
     Validate(validate::ValidateArgs),
     Witness(witness::WitnessArgs),
+    Doctor(doctor::DoctorArgs),
     #[command(name = run::SHORTCUT_SUBCOMMAND, hide = true)]
     Shortcut(run::ShortcutArgs),
 }
@@ -76,7 +78,13 @@ where
             if !candidate.starts_with('-')
                 && !matches!(
                     candidate,
-                    "run" | "compile" | "validate" | "witness" | "help" | run::SHORTCUT_SUBCOMMAND
+                    "run"
+                        | "compile"
+                        | "validate"
+                        | "witness"
+                        | "doctor"
+                        | "help"
+                        | run::SHORTCUT_SUBCOMMAND
                 )
     );
 
@@ -115,6 +123,14 @@ fn from_witness(result: witness::WitnessCommandResult) -> DispatchOutcome {
     }
 }
 
+fn from_doctor(result: doctor::DoctorCommandResult) -> DispatchOutcome {
+    DispatchOutcome {
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    }
+}
+
 fn from_command(result: Result<(), String>) -> DispatchOutcome {
     match result {
         Ok(()) => DispatchOutcome {
@@ -144,6 +160,7 @@ fn dispatch(cli: Cli) -> DispatchOutcome {
         Some(Command::Compile(args)) => from_command(compile::execute(args)),
         Some(Command::Validate(args)) => from_command(validate::execute(args)),
         Some(Command::Witness(args)) => from_witness(witness::execute(args)),
+        Some(Command::Doctor(args)) => from_doctor(doctor::execute(args)),
         Some(Command::Shortcut(args)) => from_run(run::execute_shortcut(args)),
         None => refusal_outcome(render::scaffold_message("root", false)),
     }
@@ -184,6 +201,21 @@ mod tests {
                 OsString::from("compiled.json"),
                 OsString::from("--bind"),
                 OsString::from("input=data.csv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_doctor_subcommand() {
+        let normalized = normalize_shortcut_args(["verify", "doctor", "health", "--json"]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                OsString::from("verify"),
+                OsString::from("doctor"),
+                OsString::from("health"),
+                OsString::from("--json"),
             ]
         );
     }

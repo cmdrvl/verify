@@ -244,6 +244,7 @@ Owns user-facing command surface:
 - `compile`
 - `validate`
 - `witness`
+- `doctor`
 - `--describe`
 - `--schema`
 - `--version`
@@ -871,6 +872,10 @@ verify validate <CONSTRAINTS>
 verify --schema
 verify --describe
 verify witness <query|last|count>
+verify doctor health [--json]
+verify doctor capabilities --json
+verify doctor robot-docs
+verify doctor --robot-triage
 ```
 
 `verify validate` validates compiled `verify.constraint.v1` artifacts only.
@@ -883,6 +888,12 @@ compile surface because it is the output contract of `verify compile`.
 `verify witness` is read/query-only. It participates in the same local receipt
 log pattern as the other spine tools, but witness remains supplemental local
 context rather than portable evidence.
+
+`verify doctor` is an agent-friendly, read-only inspection surface. It reports
+embedded schema health, available doctor capabilities, compact robot docs, and
+machine-readable triage without reading datasets, loading DuckDB, executing
+rules, opening the witness ledger, appending witness records, creating
+directories, writing output artifacts, or offering `doctor --fix`.
 
 ## Execution contexts
 
