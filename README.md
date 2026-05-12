@@ -1,5 +1,9 @@
 # verify
 
+![verify: deterministic constraint evaluation. A painterly dashboard with a RULES (constraints.yaml) panel on the left declaring four constraints (not_null, unique, in_range, foreign_key), and a RULE EVALUATION RESULTS table on the right showing per-rule verdicts: two pass, one fail (with the specific violating rows: row 1417 rate=0.42, row 2208 rate=0.38), and one refused (counterparties relation not bound). A VERDICT panel reports outcome FAIL with exit_code 1 and refusal_codes E_UNBOUND_RELATION. A ring-bound Constraint Rules Handbook on the desk has index tabs for each rule; an open page shows the verdicts with a handwritten margin note questioning the rate covenant breach. A legend card pairs the three verdict states with their icons.](docs/images/verify.webp)
+
+> *Do these constraints hold for this data? If not, here are the rows that broke them.*
+
 **Deterministic constraint evaluation for the epistemic spine and factory runtime.**
 
 `verify` evaluates declared constraints against one or more named relations and
@@ -409,3 +413,7 @@ br update <id> --status in_progress
 br close <id> --reason "Completed"
 br sync --flush-only              # non-invasive; stage .beads/ in normal git workflow
 ```
+
+---
+
+*`verify` is part of the open-source toolchain from the [CMD+RVL](https://cmdrvl.com) lineage and AI enablement practice. MIT-licensed. Contributions welcome from any practice or stack.*
