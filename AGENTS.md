@@ -198,6 +198,15 @@ text or mix diagnostics into stdout evidence.
 
 ## Core Invariants (Do Not Break)
 
+### 0. Config footprint is self-contained
+
+Verify has no durable config file or cache. Its implicit local receipt path is
+the shared spine witness ledger at `~/.cmdrvl/state/witness/witness.jsonl`.
+
+`EPISTEMIC_WITNESS` remains an explicit operator override. First-run migration
+from `~/.epistemic/witness.jsonl` or `.epistemic/witness.jsonl` is copy-only,
+leaves legacy files in place, and records only path metadata.
+
 ### 1. One primitive only
 
 Arity-1 and arity-N are execution cases of the same protocol.

@@ -62,7 +62,17 @@ fn doctor_health_json_is_read_only() {
     assert_eq!(payload["witness"]["opened"], false);
     assert_eq!(payload["witness"]["appended"], false);
     assert_eq!(payload["witness"]["directory_created"], false);
+    assert_eq!(
+        payload["config_footprint"]["managed_state_paths"][0],
+        "~/.cmdrvl/state/witness/witness.jsonl"
+    );
+    assert_eq!(
+        payload["config_footprint"]["legacy_migration_required"],
+        true
+    );
     assert_eq!(payload["side_effects"]["appends_witness_ledger"], false);
+    assert_eq!(payload["side_effects"]["writes_migration_logs"], false);
+    assert_eq!(payload["side_effects"]["writes_deprecation_notices"], false);
 }
 
 #[test]
@@ -80,6 +90,7 @@ fn doctor_capabilities_json_advertises_no_fixers_or_side_effects() {
     let payload = parse_stdout(&output.stdout);
     assert_eq!(payload["schema"], "verify.doctor.capabilities.v1");
     assert_eq!(payload["fixers"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["config_footprint"]["self_contained"], true);
 
     let side_effects = payload["side_effects"]
         .as_object()
@@ -106,6 +117,10 @@ fn doctor_robot_triage_json_is_machine_readable() {
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["summary"]["failed_checks"], 0);
     assert_eq!(payload["findings"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        payload["config_footprint"]["deprecation_notices"],
+        "~/.cmdrvl/notices/deprecated-paths.jsonl"
+    );
     assert_eq!(payload["side_effects"]["loads_duckdb"], false);
 }
 
@@ -124,6 +139,7 @@ fn doctor_robot_docs_is_plain_text_and_read_only() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("verify doctor robot docs"));
     assert!(stdout.contains("verify doctor health [--json]"));
+    assert!(stdout.contains("~/.cmdrvl/state/witness/witness.jsonl"));
     assert!(stdout.contains("No `doctor --fix` mode exists"));
 }
 

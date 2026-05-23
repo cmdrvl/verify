@@ -889,6 +889,14 @@ compile surface because it is the output contract of `verify compile`.
 log pattern as the other spine tools, but witness remains supplemental local
 context rather than portable evidence.
 
+The implicit witness ledger path is `~/.cmdrvl/state/witness/witness.jsonl`.
+`EPISTEMIC_WITNESS` remains an explicit operator override. On first use without
+that override, a legacy `~/.epistemic/witness.jsonl` or
+`.epistemic/witness.jsonl` ledger is copied into the canonical location, the
+legacy file is left in place, and path-only migration/deprecation records are
+written under `~/.cmdrvl/migrations/applied.jsonl` and
+`~/.cmdrvl/notices/deprecated-paths.jsonl`.
+
 `verify doctor` is an agent-friendly, read-only inspection surface. It reports
 embedded schema health, available doctor capabilities, compact robot docs, and
 machine-readable triage without reading datasets, loading DuckDB, executing

@@ -9,6 +9,8 @@ use clap::Args;
 use serde_json::{Map, Value, json};
 use verify_core::{TOOL_NAME, order::canonical_json_bytes};
 
+use crate::paths;
+
 #[derive(Debug, Clone, Args)]
 pub struct WitnessArgs {
     #[arg(value_name = "ACTION")]
@@ -91,7 +93,8 @@ pub(crate) fn append_run_record(
     params: Map<String, Value>,
     output_bytes: &[u8],
 ) -> Result<(), String> {
-    let path = witness_ledger_path();
+    let path = paths::prepare_witness_path_for_append()
+        .map_err(|error| format!("cannot prepare witness ledger path: {error}"))?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -113,7 +116,7 @@ pub(crate) fn append_run_record(
 }
 
 pub(crate) fn witness_ledger_path() -> PathBuf {
-    witness_ledger_path_from_env(|key| std::env::var(key).ok())
+    paths::default_witness_path()
 }
 
 fn execute_query(json_output: bool) -> WitnessCommandResult {
@@ -199,7 +202,8 @@ fn execute_count(json_output: bool) -> WitnessCommandResult {
 }
 
 fn load_verify_records() -> Result<Vec<Value>, String> {
-    let path = witness_ledger_path();
+    let path = paths::prepare_witness_path_for_query()
+        .map_err(|error| format!("verify: witness: failed to prepare ledger path: {error}"))?;
     load_records_from_path(&path)
 }
 
@@ -312,44 +316,6 @@ fn format_record_human(record: &Value) -> String {
     format!("{ts} {command} {outcome} exit={exit_code} inputs={input_count}")
 }
 
-fn witness_ledger_path_from_env<F>(get_env: F) -> PathBuf
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if let Some(path) = get_env("EPISTEMIC_WITNESS")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-
-    let home = home_from_env(&get_env).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".epistemic").join("witness.jsonl")
-}
-
-fn home_from_env<F>(get_env: &F) -> Option<PathBuf>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    #[cfg(unix)]
-    {
-        get_env("HOME")
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-    }
-
-    #[cfg(windows)]
-    {
-        get_env("USERPROFILE")
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        None
-    }
-}
-
 fn binary_hash() -> Option<String> {
     let path = std::env::current_exe().ok()?;
     let bytes = fs::read(path).ok()?;
@@ -376,36 +342,13 @@ fn local_hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::fs;
 
     use serde_json::{Map, json};
 
     use super::{
         WitnessInput, build_record, format_record_human, load_records_from_path, local_hash,
-        witness_ledger_path_from_env,
     };
-
-    #[test]
-    fn explicit_epistemic_witness_path_wins() {
-        let path = witness_ledger_path_from_env(|key| match key {
-            "EPISTEMIC_WITNESS" => Some("/tmp/custom-ledger.jsonl".to_owned()),
-            "HOME" => Some("/tmp/home".to_owned()),
-            _ => None,
-        });
-
-        assert_eq!(path, PathBuf::from("/tmp/custom-ledger.jsonl"));
-    }
-
-    #[test]
-    fn home_fallback_uses_standard_ledger_location() {
-        let path = witness_ledger_path_from_env(|key| match key {
-            "EPISTEMIC_WITNESS" => Some(String::new()),
-            "HOME" => Some("/tmp/home".to_owned()),
-            _ => None,
-        });
-
-        assert_eq!(path, PathBuf::from("/tmp/home/.epistemic/witness.jsonl"));
-    }
 
     #[test]
     fn local_hash_is_stable() {

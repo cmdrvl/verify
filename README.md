@@ -193,6 +193,16 @@ The doctor surface is read-only. It does not read bound inputs, execute rules,
 load DuckDB, write output artifacts, append witness records, create witness
 directories, or expose `doctor --fix`.
 
+Configuration footprint:
+
+- Shared witness ledger fallback: `~/.cmdrvl/state/witness/witness.jsonl`
+- Explicit override: `EPISTEMIC_WITNESS` for an operator-supplied ledger path
+- First use copies legacy `~/.epistemic/witness.jsonl` or
+  `.epistemic/witness.jsonl` into the canonical location, leaves legacy files
+  in place, and writes path-only records to
+  `~/.cmdrvl/migrations/applied.jsonl` and
+  `~/.cmdrvl/notices/deprecated-paths.jsonl`
+
 ---
 
 ## Compiled constraint artifact

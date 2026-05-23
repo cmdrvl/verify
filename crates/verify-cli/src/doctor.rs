@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 use verify_core::{CONSTRAINT_VERSION, REPORT_VERSION, TOOL_NAME};
 
-use crate::{render, witness};
+use crate::{paths, render, witness};
 
 const HEALTH_SCHEMA: &str = "verify.doctor.health.v1";
 const CAPABILITIES_SCHEMA: &str = "verify.doctor.capabilities.v1";
@@ -20,6 +20,8 @@ const SIDE_EFFECTS: &[&str] = &[
     "opens_witness_ledger",
     "appends_witness_ledger",
     "creates_witness_directory",
+    "writes_migration_logs",
+    "writes_deprecation_notices",
     "writes_outputs",
     "writes_doctor_artifacts",
     "uses_network",
@@ -192,6 +194,11 @@ fn collect_diagnostics() -> Diagnostics {
             detail: witness_ledger_path.clone(),
         },
         Check {
+            name: "config_footprint_declared",
+            ok: true,
+            detail: "implicit witness state is rooted under ~/.cmdrvl/state/witness".to_owned(),
+        },
+        Check {
             name: "fix_mode_disabled",
             ok: true,
             detail: "no doctor --fix argument or fixer registry is exposed".to_owned(),
@@ -258,6 +265,7 @@ fn health_value(diagnostics: &Diagnostics) -> Value {
             "appended": false,
             "directory_created": false
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": [],
         "checks": checks_value(&diagnostics.checks)
@@ -301,6 +309,7 @@ fn capabilities_value() -> Value {
             "capabilities": CAPABILITIES_SCHEMA,
             "triage": TRIAGE_SCHEMA
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
     })
@@ -328,6 +337,7 @@ fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
         } else {
             json!(["inspect embedded schema wiring and doctor dispatch checks"])
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
     })
@@ -421,6 +431,7 @@ fn robot_docs() -> String {
         "- The doctor surface does not read datasets, authoring files, compiled constraints, or stdin.",
         "- The doctor surface does not load DuckDB or execute constraint rules.",
         "- The doctor surface does not open, append, or create witness ledger files.",
+        "- The implicit witness ledger fallback is `~/.cmdrvl/state/witness/witness.jsonl`; `EPISTEMIC_WITNESS` remains an explicit operator override.",
         "- No `doctor --fix` mode exists in this slice.",
         "",
         "Exit codes:",
