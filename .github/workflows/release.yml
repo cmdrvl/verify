@@ -96,6 +96,9 @@ jobs:
             bin="target/${{ matrix.target }}/release/verify.exe"
           fi
           "$bin" --version
+          "$bin" --robot-triage
+          "$bin" capabilities --json
+          "$bin" robot-docs guide
           "$bin" doctor health
           "$bin" doctor capabilities --json
           "$bin" doctor robot-docs

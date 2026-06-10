@@ -1,0 +1,15 @@
+{
+  "target_path": "/Users/zac/Source/cmdrvl/verify",
+  "discovered_at": "2026-06-10T16:48:01Z",
+  "languages": [
+    "rust"
+  ],
+  "binaries": [],
+  "env_var_prefix": "",
+  "existing_surfaces": {
+    "robot_mode": false,
+    "capabilities": false,
+    "robot_docs": false
+  },
+  "recommended_mode": "full"
+}

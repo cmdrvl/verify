@@ -73,8 +73,25 @@ fn help_output_lists_primary_run_surface() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: verify"));
     assert!(stdout.contains("Commands:"));
+    assert!(stdout.contains("--robot-triage"));
+    assert!(stdout.contains("capabilities"));
+    assert!(stdout.contains("robot-docs"));
     assert!(stdout.contains("run"));
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn bare_verify_explains_discovery_and_run_commands() {
+    let output = verify_command().output().expect("bare command should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no command or dataset was provided"));
+    assert!(stderr.contains("verify --robot-triage"));
+    assert!(stderr.contains("verify capabilities --json"));
+    assert!(stderr.contains("verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH>"));
 }
 
 #[test]

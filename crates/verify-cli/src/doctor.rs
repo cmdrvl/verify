@@ -4,6 +4,7 @@ use verify_core::{CONSTRAINT_VERSION, REPORT_VERSION, TOOL_NAME};
 
 use crate::{paths, render, witness};
 
+const TOP_LEVEL_CAPABILITIES_SCHEMA: &str = "verify.capabilities.v1";
 const HEALTH_SCHEMA: &str = "verify.doctor.health.v1";
 const CAPABILITIES_SCHEMA: &str = "verify.doctor.capabilities.v1";
 const TRIAGE_SCHEMA: &str = "verify.doctor.triage.v1";
@@ -50,6 +51,24 @@ pub enum DoctorAction {
 pub struct DoctorJsonArgs {
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TopLevelCapabilitiesArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TopLevelRobotDocsArgs {
+    #[command(subcommand)]
+    pub action: Option<TopLevelRobotDocsAction>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum TopLevelRobotDocsAction {
+    #[command(about = "Print the agent quick-start guide")]
+    Guide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +135,24 @@ pub fn execute(args: DoctorArgs) -> DoctorCommandResult {
         }
         DoctorAction::RobotDocs => text_result(robot_docs(), 0),
     }
+}
+
+pub fn execute_top_level_robot_triage() -> DoctorCommandResult {
+    let diagnostics = collect_diagnostics();
+    json_result(robot_triage_value(&diagnostics), diagnostics.exit_code())
+}
+
+pub fn execute_top_level_capabilities(args: TopLevelCapabilitiesArgs) -> DoctorCommandResult {
+    let value = top_level_capabilities_value();
+    if args.json {
+        json_result(value, 0)
+    } else {
+        text_result(human_top_level_capabilities(), 0)
+    }
+}
+
+pub fn execute_top_level_robot_docs(_args: TopLevelRobotDocsArgs) -> DoctorCommandResult {
+    text_result(top_level_robot_docs(), 0)
 }
 
 fn text_result(stdout: String, exit_code: u8) -> DoctorCommandResult {
@@ -315,6 +352,99 @@ fn capabilities_value() -> Value {
     })
 }
 
+fn top_level_capabilities_value() -> Value {
+    json!({
+        "schema": TOP_LEVEL_CAPABILITIES_SCHEMA,
+        "tool": TOOL_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+        "purpose": "Deterministic constraint evaluation for declared relation constraints.",
+        "protocols": {
+            "constraint": CONSTRAINT_VERSION,
+            "report": REPORT_VERSION,
+            "doctor_health": HEALTH_SCHEMA,
+            "doctor_capabilities": CAPABILITIES_SCHEMA,
+            "doctor_triage": TRIAGE_SCHEMA
+        },
+        "standard_agent_surfaces": {
+            "robot_triage": "verify --robot-triage",
+            "capabilities_json": "verify capabilities --json",
+            "robot_docs": "verify robot-docs guide"
+        },
+        "commands": [
+            {
+                "command": "verify --robot-triage",
+                "read_only": true,
+                "writes_witness": false,
+                "stdout": "verify.doctor.triage.v1 JSON",
+                "exit_codes": {"0": "healthy", "2": "unhealthy diagnostics"}
+            },
+            {
+                "command": "verify capabilities --json",
+                "read_only": true,
+                "writes_witness": false,
+                "stdout": TOP_LEVEL_CAPABILITIES_SCHEMA
+            },
+            {
+                "command": "verify robot-docs guide",
+                "read_only": true,
+                "writes_witness": false,
+                "stdout": "plain text agent guide"
+            },
+            {
+                "command": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--json] [--no-witness]",
+                "read_only": false,
+                "writes_witness": "unless --no-witness is set",
+                "domain_outcomes": {"0": "PASS", "1": "FAIL", "2": "REFUSAL"},
+                "stdout": "human report or verify.report.v1 JSON"
+            },
+            {
+                "command": "verify <DATASET> --rules <AUTHORING> [--json] [--no-witness]",
+                "read_only": false,
+                "writes_witness": "unless --no-witness is set",
+                "domain_outcomes": {"0": "PASS", "1": "FAIL", "2": "REFUSAL"},
+                "stdout": "human report or verify.report.v1 JSON"
+            },
+            {
+                "command": "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
+                "read_only": "only with --check or --json and without --out",
+                "writes_outputs": "when --out is set"
+            },
+            {
+                "command": "verify validate <COMPILED_CONSTRAINTS> [--json]",
+                "read_only": true,
+                "stdout": "validation result"
+            },
+            {
+                "command": "verify witness <query|last|count> [--json]",
+                "read_only": true,
+                "opens_witness_ledger": true
+            },
+            {
+                "command": "verify --schema",
+                "read_only": true,
+                "stdout": REPORT_VERSION
+            },
+            {
+                "command": "verify compile --schema",
+                "read_only": true,
+                "stdout": CONSTRAINT_VERSION
+            }
+        ],
+        "config_footprint": paths::config_footprint(),
+        "doctor": capabilities_value(),
+        "composition": {
+            "upstream": ["normalize", "materialize"],
+            "factory_upstream": ["twinning", "decoding"],
+            "downstream": ["assess", "pack"],
+            "boundaries": [
+                "verify enforces declared constraints",
+                "benchmark scores gold-set correctness",
+                "assess decides proceed, escalate, or block"
+            ]
+        }
+    })
+}
+
 fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
     json!({
         "schema": TRIAGE_SCHEMA,
@@ -413,6 +543,53 @@ fn human_capabilities() -> String {
         "read_only: true",
         "side_effects: none",
         "fixers: none",
+    ]
+    .join("\n")
+}
+
+fn human_top_level_capabilities() -> String {
+    [
+        "verify capabilities",
+        "schema: verify.capabilities.v1",
+        "standard agent surfaces:",
+        "- verify --robot-triage",
+        "- verify capabilities --json",
+        "- verify robot-docs guide",
+        "domain outcomes:",
+        "- 0: PASS",
+        "- 1: FAIL",
+        "- 2: REFUSAL",
+    ]
+    .join("\n")
+}
+
+fn top_level_robot_docs() -> String {
+    [
+        "verify robot-docs guide",
+        "",
+        "Quick start:",
+        "- `verify --robot-triage` returns one read-only JSON health packet.",
+        "- `verify capabilities --json` returns the full machine-readable command contract.",
+        "- `verify run COMPILED.verify.json --bind input=data.csv --json --no-witness` evaluates a compiled constraint set without appending a witness record.",
+        "- `verify DATASET.csv --rules rules.yaml --json --no-witness` compiles and runs the arity-1 shortcut.",
+        "- `verify compile AUTHORING.yaml --check --json` validates authoring without writing an output file.",
+        "",
+        "Outcome contract:",
+        "- `0` means PASS.",
+        "- `1` means FAIL.",
+        "- `2` means REFUSAL.",
+        "- JSON report output is `verify.report.v1`.",
+        "",
+        "Witness boundary:",
+        "- Run/evaluate commands append local witness records by default.",
+        "- Add `--no-witness` for read-side smoke tests and deterministic agent probes.",
+        "- Doctor, triage, capabilities, robot-docs, schema, and validate surfaces do not append witness records.",
+        "",
+        "Composition:",
+        "- Use `verify` after normalize/materialize to enforce declared constraints.",
+        "- Use embedded verify inside twinning/decoding for portable runtime constraints.",
+        "- Use `assess` after verify when a proceed/escalate/block decision is needed.",
+        "- Use `pack` to bundle reports and evidence.",
     ]
     .join("\n")
 }

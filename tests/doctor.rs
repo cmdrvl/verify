@@ -125,6 +125,71 @@ fn doctor_robot_triage_json_is_machine_readable() {
 }
 
 #[test]
+fn top_level_robot_triage_json_is_machine_readable_and_read_only() {
+    let witness = isolated_witness_path("top-level-triage");
+    let output = verify_command_with_witness(&witness)
+        .arg("--robot-triage")
+        .output()
+        .expect("top-level robot triage should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_witness_absent(&witness);
+
+    let payload = parse_stdout(&output.stdout);
+    assert_eq!(payload["schema"], "verify.doctor.triage.v1");
+    assert_eq!(payload["tool"], "verify");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["side_effects"]["loads_duckdb"], false);
+}
+
+#[test]
+fn top_level_capabilities_json_describes_standard_agent_surfaces() {
+    let witness = isolated_witness_path("top-level-capabilities");
+    let output = verify_command_with_witness(&witness)
+        .args(["capabilities", "--json"])
+        .output()
+        .expect("top-level capabilities should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_witness_absent(&witness);
+
+    let payload = parse_stdout(&output.stdout);
+    assert_eq!(payload["schema"], "verify.capabilities.v1");
+    assert_eq!(
+        payload["standard_agent_surfaces"]["robot_triage"],
+        "verify --robot-triage"
+    );
+    assert_eq!(
+        payload["standard_agent_surfaces"]["capabilities_json"],
+        "verify capabilities --json"
+    );
+    assert_eq!(payload["commands"][3]["domain_outcomes"]["1"], "FAIL");
+    assert_eq!(payload["doctor"]["schema"], "verify.doctor.capabilities.v1");
+}
+
+#[test]
+fn top_level_robot_docs_guide_is_plain_text_and_read_only() {
+    let witness = isolated_witness_path("top-level-docs");
+    let output = verify_command_with_witness(&witness)
+        .args(["robot-docs", "guide"])
+        .output()
+        .expect("top-level robot docs should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_witness_absent(&witness);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("verify robot-docs guide"));
+    assert!(stdout.contains("verify --robot-triage"));
+    assert!(stdout.contains("Outcome contract"));
+    assert!(stdout.contains("assess"));
+    assert!(stdout.contains("pack"));
+}
+
+#[test]
 fn doctor_robot_docs_is_plain_text_and_read_only() {
     let witness = isolated_witness_path("docs");
     let output = verify_command_with_witness(&witness)

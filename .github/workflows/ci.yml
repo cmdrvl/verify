@@ -49,6 +49,9 @@ jobs:
         run: cargo test
       - name: Smoke doctor surface
         run: |
+          cargo run --locked -p verify-cli -- --robot-triage
+          cargo run --locked -p verify-cli -- capabilities --json
+          cargo run --locked -p verify-cli -- robot-docs guide
           cargo run --locked -p verify-cli -- doctor health
           cargo run --locked -p verify-cli -- doctor capabilities --json
           cargo run --locked -p verify-cli -- doctor robot-docs
@@ -110,6 +113,9 @@ jobs:
           if [ "$RUNNER_OS" != "Windows" ]; then
             ./target/release/verify --version
             ./target/release/verify --help || true
+            ./target/release/verify --robot-triage
+            ./target/release/verify capabilities --json
+            ./target/release/verify robot-docs guide
             ./target/release/verify doctor health
             ./target/release/verify doctor capabilities --json
             ./target/release/verify doctor robot-docs
@@ -117,6 +123,9 @@ jobs:
           else
             ./target/release/verify.exe --version
             ./target/release/verify.exe --help || true
+            ./target/release/verify.exe --robot-triage
+            ./target/release/verify.exe capabilities --json
+            ./target/release/verify.exe robot-docs guide
             ./target/release/verify.exe doctor health
             ./target/release/verify.exe doctor capabilities --json
             ./target/release/verify.exe doctor robot-docs

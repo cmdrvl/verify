@@ -21,6 +21,8 @@ use clap::{ArgAction, Parser, Subcommand};
     propagate_version = true
 )]
 struct Cli {
+    #[arg(long = "robot-triage", action = ArgAction::SetTrue)]
+    robot_triage: bool,
     #[arg(long, action = ArgAction::SetTrue, global = true)]
     schema: bool,
     #[arg(long, action = ArgAction::SetTrue, global = true)]
@@ -31,6 +33,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Emit the machine-readable CLI capabilities contract")]
+    Capabilities(doctor::TopLevelCapabilitiesArgs),
+    #[command(about = "Print agent-facing operational guidance")]
+    RobotDocs(doctor::TopLevelRobotDocsArgs),
     Run(run::RunArgs),
     Compile(compile::CompileArgs),
     Validate(validate::ValidateArgs),
@@ -84,6 +90,8 @@ where
                         | "validate"
                         | "witness"
                         | "doctor"
+                        | "capabilities"
+                        | "robot-docs"
                         | "help"
                         | run::SHORTCUT_SUBCOMMAND
                 )
@@ -156,15 +164,33 @@ fn dispatch(cli: Cli) -> DispatchOutcome {
         return refusal_outcome(render::scaffold_message("describe", false));
     }
 
+    if cli.robot_triage {
+        return from_doctor(doctor::execute_top_level_robot_triage());
+    }
+
     match cli.command {
+        Some(Command::Capabilities(args)) => {
+            from_doctor(doctor::execute_top_level_capabilities(args))
+        }
+        Some(Command::RobotDocs(args)) => from_doctor(doctor::execute_top_level_robot_docs(args)),
         Some(Command::Run(args)) => from_run(run::execute(args)),
         Some(Command::Compile(args)) => from_command(compile::execute(args)),
         Some(Command::Validate(args)) => from_command(validate::execute(args)),
         Some(Command::Witness(args)) => from_witness(witness::execute(args)),
         Some(Command::Doctor(args)) => from_doctor(doctor::execute(args)),
         Some(Command::Shortcut(args)) => from_run(run::execute_shortcut(args)),
-        None => refusal_outcome(render::scaffold_message("root", false)),
+        None => refusal_outcome(root_guidance()),
     }
+}
+
+fn root_guidance() -> String {
+    [
+        "verify: no command or dataset was provided.",
+        "For agent discovery, run `verify --robot-triage`, `verify capabilities --json`, or `verify robot-docs guide`.",
+        "To evaluate constraints, run `verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH>` or `verify <DATASET> --rules <AUTHORING>`.",
+        "For help with verify, run `verify --help`.",
+    ]
+    .join(" ")
 }
 
 #[cfg(test)]
@@ -217,6 +243,26 @@ mod tests {
                 OsString::from("doctor"),
                 OsString::from("health"),
                 OsString::from("--json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_top_level_agent_subcommands() {
+        assert_eq!(
+            normalize_shortcut_args(["verify", "capabilities", "--json"]),
+            vec![
+                OsString::from("verify"),
+                OsString::from("capabilities"),
+                OsString::from("--json"),
+            ]
+        );
+        assert_eq!(
+            normalize_shortcut_args(["verify", "robot-docs", "guide"]),
+            vec![
+                OsString::from("verify"),
+                OsString::from("robot-docs"),
+                OsString::from("guide"),
             ]
         );
     }
