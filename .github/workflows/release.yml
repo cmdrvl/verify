@@ -45,7 +45,9 @@ jobs:
             strip: macos
             use_cross: false
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            # DuckDB's bundled fmt is not compatible with the VS 2026/MSVC 14.51
+            # image currently behind windows-latest.
+            os: windows-2022
             archive_ext: zip
             bin: verify.exe
             strip: none
@@ -77,6 +79,13 @@ jobs:
           PY
           )
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Windows C++ standard
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          "CXXFLAGS=/std:c++17" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CXXFLAGS_x86_64_pc_windows_msvc=/std:c++17" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build (cross)
         if: matrix.use_cross
