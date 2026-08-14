@@ -35,3 +35,7 @@ target-*/
 
 # Agent ergonomics helper scratch emitted when scripts are called from repo root
 /phase0_skill_inventory.json
+
+# br writes a timestamped backup here on every --force flush (see the beads
+# hooks in cmdrvl-cli/scripts/beads-hooks). Local safety net, not shared state.
+.beads/.br_history/
