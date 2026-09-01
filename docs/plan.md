@@ -49,6 +49,11 @@ Deferred beyond v0:
 - hosted orchestration concerns
 - rules lifecycle machinery beyond content hashing and evidence packing
 
+The first post-v0 extension admits binding-qualified predicates in the batch
+executor. It preserves the v0 artifact families and predicate grammar while
+adding an explicit batch-only execution case; it does not retroactively expand
+the completed v0 scope.
+
 ## Core definition
 
 `verify` is the epistemic spine's constraint primitive.
@@ -104,8 +109,9 @@ Batch CLI and embedded runtime should differ only in invocation, not in meaning.
 The protocol must support both:
 
 - **portable rules** that can run in CLI and factory runtime
-- **batch-only query rules** that are valid in the spine batch executor but not
-  embeddable in the factory runtime without lowering/translation
+- **batch-only rules** that are valid in the spine batch executor but not
+  embeddable in the factory runtime without lowering/translation; these include
+  query-backed rules and structured predicates with cross-binding references
 
 This is stricter than pretending every SQL check is automatically factory-grade.
 
@@ -228,13 +234,15 @@ No filesystem concerns. No command-line concerns.
 
 ### `verify-duckdb`
 
-Owns batch bindings and query-backed execution:
+Owns batch bindings and batch-only execution:
 
 - CSV / JSON / JSONL / Parquet bindings
 - DuckDB-backed relation materialization
 - batch-only query rule execution
+- deterministic lowering and execution of binding-qualified predicates
 
-This crate is the bridge from on-disk artifacts into `verify-engine`.
+This crate is the bridge from on-disk artifacts into `verify-engine` and the
+explicit home of semantics that are valid only in batch execution.
 
 ### `verify-cli`
 
@@ -352,9 +360,10 @@ validated, hashed, packed, and embedded.
 
 ### Authoring inputs and compile contract
 
-V0 may accept two authoring families:
+The authoring surface accepts two families:
 
-- simple JSON/YAML authoring for portable rules
+- structured JSON/YAML authoring for portable rules and binding-qualified,
+  batch-only predicates
 - SQL assertion files for `query_zero_rows`
 
 Those are authoring surfaces, not the canonical runtime contract. `verify
@@ -363,6 +372,14 @@ compile` must normalize them into `verify.constraint.v1` so that:
 - rule IDs, severities, and portability are explicit
 - bindings are declared before execution
 - the runtime never has to guess which semantics a source file implied
+
+For structured authoring, the compiler derives predicate portability from the
+expression. A predicate whose column references all resolve to its anchor
+binding compiles as `portable`. A predicate with at least one reference to a
+different binding compiles as `batch_only`. If authoring declares portability
+explicitly, it must equal the derived value; the compiler refuses a mismatch
+rather than trusting an assertion that could route the rule to the wrong
+executor.
 
 For SQL-backed authoring, each named assertion compiles into one rule entry in
 `rules` with `portability = "batch_only"` and the stored query payload required
@@ -387,6 +404,8 @@ Portable:
 Batch-only:
 
 - `query_zero_rows`
+- `predicate` when any column reference names a binding other than the rule's
+  anchor binding
 
 `query_zero_rows` exists so the batch spine executor can support SQL-heavy
 relational checks without pretending those rules are automatically usable inside
@@ -399,7 +418,7 @@ lowered into portable ops or implemented as a dedicated portable rule kind.
 |------|-------------|-----------------|---------|
 | `unique` | portable | `binding`, `columns[]` | No two rows may share the same tuple across the named columns |
 | `not_null` | portable | `binding`, `columns[]` | Named columns must be present and non-null for every row |
-| `predicate` | portable | `binding`, `expr` | Row-level boolean expression must evaluate true for every row |
+| `predicate` | portable or batch_only | `binding`, `expr` | Expression must evaluate true for every anchor row; references to another binding require batch execution |
 | `row_count` | portable | `binding`, `compare` | Relation row count must satisfy the declared comparison |
 | `aggregate_compare` | portable | `binding`, `aggregate`, `compare` | Aggregate over one binding must satisfy the declared comparison |
 | `foreign_key` | portable | `binding`, `columns[]`, `ref_binding`, `ref_columns[]` | Referencing rows must resolve against the referenced relation key |
@@ -449,6 +468,22 @@ Minimum expression forms:
   - `is_blank`
 - value access:
   - `{ "column": "<NAME>" }`
+  - `{ "binding": "<NAME>", "column": "<NAME>" }`
+
+`Check::Predicate.binding` is the rule's **anchor binding**. An omitted
+`ColumnReference.binding` resolves to that anchor. An explicit binding equal to
+the anchor has the same meaning. A reference to any other declared binding is a
+binding-qualified reference and makes the rule batch-only.
+
+`binding` is optional on `ColumnReference` rather than represented by a second
+expression or rule family. Serializers omit it when absent, so every existing
+compiled artifact retains its bytes and meaning. This is an additive extension
+to `verify.constraint.v1`, not a second compiled contract.
+
+A verifier built before this extension will reject the new field through its
+closed-world parser. That fail-closed behavior is intentional: an older binary
+must never discard `binding` and execute a cross-binding rule as a tautological
+single-binding predicate.
 
 Examples:
 
@@ -546,6 +581,193 @@ produce the same refusal semantics. In particular, a numeric cell compared with
 the string literal `"0"` refuses rather than relying on implicit coercion or
 evaluating as unequal.
 
+#### Binding-qualified predicate contract
+
+Binding-qualified predicates extend the same structured predicate grammar over
+key-aligned named relations. They do not admit raw SQL, new domain operators, or
+a second predicate language.
+
+Example:
+
+```json
+{
+  "id": "MATURITY_DATE_IMMUTABLE",
+  "severity": "error",
+  "portability": "batch_only",
+  "check": {
+    "op": "predicate",
+    "binding": "current",
+    "expr": {
+      "eq": [
+        { "binding": "current", "column": "maturity_date" },
+        { "binding": "prior", "column": "maturity_date" }
+      ]
+    }
+  }
+}
+```
+
+The executor derives the complete participating-binding set from the anchor and
+every column reference in the expression before evaluation. References in all
+boolean branches participate even if ordinary short-circuit evaluation could
+skip a branch. Every referenced binding must be declared.
+
+##### Anchor row domain
+
+- `Check::Predicate.binding` is the anchor.
+- Every anchor row is evaluated exactly once.
+- Each distinct non-anchor binding contributes exactly one counterpart row for
+  the anchor row's key tuple.
+- A row present only in a non-anchor binding is outside this rule invocation. It
+  neither fails the predicate nor produces an affected entry.
+- An anchor row without exactly one counterpart in every referenced non-anchor
+  binding refuses the run. Missing counterparts are not predicate failures.
+
+This asymmetric row domain is intentional. It supports rules such as "fields on
+the current relation must agree with the prior relation" without silently
+turning the predicate into a full outer reconciliation primitive. Symmetric
+coverage belongs in a separately declared rule in the opposite direction or a
+dedicated relation rule.
+
+##### Key alignment and identity
+
+Every participating binding must declare a non-empty `key_fields` tuple.
+Tuples align positionally, so physical key names may differ:
+
+```text
+current.key_fields = [loan_id, tranche_id]
+prior.key_fields   = [asset_number, class_code]
+                         |              |
+                         + position 0   + position 1
+```
+
+All participating tuples must have the same arity. A missing declaration, an
+empty tuple, or incompatible arity makes the compiled rule invalid and maps to
+`E_BAD_CONSTRAINTS`. The schema should reject an explicitly empty `key_fields`
+array; semantic validation checks the cross-binding arity constraint.
+
+For JSON/YAML authoring, portability, declaration, and key-shape defects are
+`E_BAD_AUTHORING`. The same defects in an already compiled artifact are
+`E_BAD_CONSTRAINTS`. Their stable `reason` values are
+`portability_mismatch`, `undeclared_reference`, `missing_key_fields`,
+`empty_key_fields`, and `key_arity_mismatch`; detail includes `rule_id`, the
+participating bindings, and each binding's declared key fields when relevant.
+
+Before predicate evaluation, the batch executor validates the full key surface
+of every participating relation:
+
+- every declared key field must exist, otherwise `E_FIELD_NOT_FOUND`
+- every key component must be a non-null protocol scalar; a null, array, object,
+  or unrepresentable component refuses with `E_KEY_INVALID`
+- corresponding components compare with the same type-strict scalar equality
+  contract as predicate `eq`; incompatible component categories refuse with
+  `E_KEY_INVALID`, and no string/number/boolean coercion is permitted
+- string keys compare exactly, without trimming, case folding, or collation
+  changes
+- every key tuple must be unique within its binding; a duplicate makes lookup
+  ambiguous and refuses with `E_KEY_AMBIGUOUS`
+
+Key uniqueness is validated across the full participating relation, including
+non-anchor rows that are otherwise outside the rule's row domain. This makes
+relation identity a precondition rather than allowing ambiguous data to become
+conditionally acceptable based on which rows happen to be referenced.
+
+The internal join key is an ordered sequence of tagged scalar values. Physical
+key-field names are retained for diagnostics and affected entries but are not
+part of cross-binding equality, because positionally aligned bindings may use
+different names.
+
+##### Field resolution and scalar semantics
+
+All column references are resolved and checked before the first row verdict is
+emitted. A missing referenced field refuses with `E_FIELD_NOT_FOUND`, including
+the referenced binding and field in the detail.
+
+The DuckDB lane must reuse the protocol scalar categories and comparison
+semantics defined above. In particular:
+
+- DuckDB implicit casts are never allowed to decide a predicate verdict
+- the DuckDB-to-protocol scalar classification is shared with the existing
+  batch portable-materialization path rather than duplicated; the converter
+  lives below the CLI in `verify-duckdb` and is called by both paths
+- numeric DuckDB families enter the protocol `number` category; boolean and
+  string families remain distinct
+- null equality, null ordering, heterogeneous membership, and full-branch
+  comparability behave exactly as they do for portable predicates
+- a DuckDB type that cannot be represented as a declared protocol scalar
+  refuses rather than being compared through engine-specific behavior
+
+An incomparable expression refuses with `E_BAD_EXPR`. Its detail preserves the
+existing `rule_id`, `operator`, `left_type`, `right_type`, anchor `binding`, and
+anchor `key` fields and additionally names `left_binding` / `left_field` and
+`right_binding` / `right_field` when those operands are column references.
+
+`E_KEY_INVALID.detail.reason` is one of `null_component`,
+`non_scalar_component`, `unrepresentable_component`, or `type_mismatch`.
+`type_mismatch` detail names both participating bindings, physical key fields,
+and protocol scalar categories for the mismatched tuple position.
+
+##### Batch execution and lowering boundary
+
+All bound relations are already loaded as temporary tables in one
+`verify_duckdb::BatchContext`. The executor must use that existing connection.
+It must not open a second database, reload inputs, or create durable state.
+
+The structured predicate AST is lowered deterministically inside
+`verify-duckdb`. Binding and column names are identifiers taken from the
+validated compiled artifact and are quoted as identifiers; literal values are
+bound or rendered through one canonical literal encoder. Generated SQL remains
+an implementation detail and never becomes authoring or report evidence.
+
+Lowering must preserve AST order for diagnostics but may share repeated joins
+and projections. It must perform protocol type checks explicitly before issuing
+semantic comparisons, so a direct DuckDB comparison with implicit coercion is
+not an acceptable implementation.
+
+Each distinct non-anchor binding is joined to the anchor once per rule through
+the positionally aligned key tuple. The executor must not issue one query per
+anchor row or construct a Cartesian product and filter it afterward. Key
+validation and predicate execution should remain set-oriented in DuckDB; only
+result and refusal data needed for the report crosses back into Rust.
+
+Embedded execution does not approximate this rule. It sees
+`portability = "batch_only"` and refuses with `E_BATCH_ONLY_RULE` before portable
+evaluation. A future portable lowering may reclassify the same structured rule
+only after batch/embedded differential conformance is proved.
+
+##### Failure localization
+
+A false predicate produces one affected entry per failed anchor row:
+
+- `binding` is always the anchor binding
+- `key` is the complete anchor key tuple
+- `field` and `value` are populated only when the failing expression localizes
+  unambiguously to one anchor column and its observed value
+- comparisons involving multiple columns, or boolean expressions with multiple
+  implicated leaves, leave `field` and `value` absent rather than choosing one
+  arbitrarily
+
+`violation_count` is therefore the number of failed anchor rows, not the number
+of false leaves or joined rows. A refusal aborts the run and does not emit a
+partial rule result.
+
+##### Deterministic validation and refusal precedence
+
+When more than one defect exists, evaluation selects the first refusal in this
+stable order:
+
+1. compiled-contract checks: declarations, portability, and key arity
+2. referenced fields, ordered by binding name and then field name
+3. invalid or duplicate keys, ordered by binding name and canonical key tuple
+4. unmatched counterpart keys, ordered by canonical anchor key tuple and then
+   referenced binding name
+5. expression evaluation, in canonical anchor-key order and AST order
+
+Canonical tuple ordering uses the same canonical JSON scalar ordering helpers as
+report ordering over the ordered key-value sequence; it must not inherit scan
+order from DuckDB. Failed affected entries are sorted by the normal report
+ordering contract.
+
 #### `query_zero_rows` localization contract
 
 `query_zero_rows` must not stop at row counting. It needs a deterministic map
@@ -576,10 +798,12 @@ Bindings are named relations, not "files". Batch execution happens to satisfy
 bindings from files; embedded execution satisfies bindings from in-memory
 relations.
 
-Bindings may optionally declare `key_fields`. These are not required for rule
-evaluation, but they are the canonical localization surface for failed rows in
-reports when the relation has a stable entity key. This matters because
-localized failures are part of the protocol, not just CLI sugar.
+Bindings may optionally declare `key_fields`. When present, the tuple must be
+non-empty and contain unique field names. Most rule kinds do not require a key,
+but binding-qualified predicates require one on every participating binding.
+Key fields are the canonical localization surface for failed rows in reports
+when the relation has a stable entity key. This matters because localized
+failures are part of the protocol, not just CLI sugar.
 
 For batch-loaded string fields, the executor must preserve raw scalar content
 for reporting but also apply the v0 missingness rules consistently:
@@ -936,7 +1160,9 @@ The spine batch executor:
 
 - binds named relations from on-disk files
 - verifies lock membership when requested
-- evaluates the constraint set
+- evaluates portable rules through `verify-engine`
+- evaluates binding-qualified batch-only predicates and `query_zero_rows`
+  through the existing DuckDB batch context
 - emits `verify.report.v1`
 - appends a normal witness record
 
@@ -1041,6 +1267,25 @@ A self-consistent answer can still be wrong.
 - `I17` Query localization invariant: every `query_zero_rows` failure row maps
   deterministically into one `affected` entry via the reserved output-column
   contract.
+- `I18` Predicate-anchor invariant: every predicate has one anchor binding;
+  omitted column-reference bindings resolve to it, and only distinct binding
+  references change portability.
+- `I19` Predicate-portability invariant: a predicate is `batch_only` if and only
+  if its expression references a binding other than its anchor; declared and
+  derived portability must agree.
+- `I20` Key-alignment invariant: every binding participating in a
+  binding-qualified predicate declares a non-empty, unique key tuple of the same
+  arity, aligned positionally.
+- `I21` Key-identity invariant: participating key tuples contain non-null,
+  type-compatible protocol scalars and are unique within each relation.
+- `I22` Anchor-domain invariant: binding-qualified predicates evaluate exactly
+  the anchor rows; non-anchor-only rows are outside the invocation, while a
+  missing anchor counterpart refuses.
+- `I23` Comparison invariant: DuckDB coercion, collation, and scan order cannot
+  change predicate meaning, refusal choice, or output order.
+- `I24` Cross-binding localization invariant: each false predicate produces one
+  affected anchor row, with field/value included only when localization to one
+  anchor column is unambiguous.
 
 ## Refusal codes
 
@@ -1062,6 +1307,9 @@ refusal codes:
 | `VerifyError::FormatDetect` | `E_FORMAT_DETECT` | Unsupported or ambiguous file format |
 | `VerifyError::FieldReference` | `E_FIELD_NOT_FOUND` | Rule references a field missing from a bound relation |
 | `VerifyError::BadExpression` | `E_BAD_EXPR` | Invalid predicate or aggregate compare expression |
+| `VerifyError::InvalidKey` | `E_KEY_INVALID` | A join key is null, non-scalar, unrepresentable, or type-incompatible |
+| `VerifyError::AmbiguousKey` | `E_KEY_AMBIGUOUS` | A participating binding contains a duplicate key tuple |
+| `VerifyError::UnmatchedKey` | `E_KEY_UNMATCHED` | An anchor row has no counterpart in a referenced binding |
 | `VerifyError::SqlExecution` | `E_SQL_ERROR` | `query_zero_rows` failed in DuckDB |
 | `VerifyError::EmbeddedUnsupported` | `E_BATCH_ONLY_RULE` | Batch-only rule used in embedded execution |
 | `VerifyError::KeyOverrideConflict` | `E_KEY_CONFLICT` | Shortcut `--key` conflicts with authored `key_fields` |
@@ -1082,6 +1330,9 @@ refusal codes:
 | `E_FORMAT_DETECT` | Bound input format cannot be loaded | Use CSV, JSON, JSONL, or Parquet |
 | `E_FIELD_NOT_FOUND` | Rule references a missing field | Fix the constraint set or input schema |
 | `E_BAD_EXPR` | Predicate or aggregate expression is invalid | Fix the rule expression |
+| `E_KEY_INVALID` | A participating join key cannot establish type-strict identity | Fix the key data or correct the binding's `key_fields` |
+| `E_KEY_AMBIGUOUS` | A participating relation contains a duplicate key tuple | Deduplicate the keyed relation or correct `key_fields` |
+| `E_KEY_UNMATCHED` | An anchor key has no row in a referenced binding | Supply the counterpart row or correct key alignment |
 | `E_SQL_ERROR` | `query_zero_rows` failed during batch execution | Fix the query-backed rule |
 | `E_BATCH_ONLY_RULE` | Embedded execution received a batch-only rule | Lower the rule or run in batch mode |
 | `E_KEY_CONFLICT` | Shortcut `--key` disagrees with authored `key_fields` | Remove the CLI override or fix the authored binding key |
@@ -1152,6 +1403,47 @@ E_BAD_EXPR (runtime scalar incomparability):
     "field": "balance"
   }
 
+E_BAD_EXPR (binding-qualified operand incomparability):
+  {
+    "rule_id": "MATURITY_DATE_IMMUTABLE",
+    "operator": "eq",
+    "left_type": "string",
+    "right_type": "number",
+    "binding": "current",
+    "key": { "loan_id": "LN-00421" },
+    "left_binding": "current",
+    "left_field": "maturity_date",
+    "right_binding": "prior",
+    "right_field": "maturity_date"
+  }
+
+E_KEY_INVALID:
+  {
+    "rule_id": "MATURITY_DATE_IMMUTABLE",
+    "binding": "prior",
+    "key_fields": ["asset_number"],
+    "field": "asset_number",
+    "value_type": "null",
+    "reason": "null_component"
+  }
+
+E_KEY_AMBIGUOUS:
+  {
+    "rule_id": "MATURITY_DATE_IMMUTABLE",
+    "binding": "prior",
+    "key": { "asset_number": "LN-00421" },
+    "occurrences": 2
+  }
+
+E_KEY_UNMATCHED:
+  {
+    "rule_id": "MATURITY_DATE_IMMUTABLE",
+    "binding": "current",
+    "key": { "loan_id": "LN-00421" },
+    "missing_binding": "prior",
+    "missing_key_fields": ["asset_number"]
+  }
+
 E_KEY_CONFLICT:
   {
     "binding": "input",
@@ -1195,6 +1487,13 @@ Named test suites should exist before calling v0 complete:
   identically for `not_null`
 - `predicate_grammar` — equality, membership, boolean composition, and
   null/blank checks round-trip through authoring and execute deterministically
+- `binding_qualified_predicates` — compile/validate portability inference,
+  positionally aligned composite keys with different physical names, full
+  predicate grammar PASS/FAIL behavior, anchor-only row domain, localization,
+  and embedded `E_BATCH_ONLY_RULE`
+- `binding_qualified_refusals` — absent/empty/incompatible keys, missing key or
+  operand fields, duplicate keys, unmatched anchor keys, invalid key scalars,
+  and incomparable operands produce the pinned refusal codes and detail
 - `query_localization` — reserved SQL result columns map into `affected`
   bindings / keys / fields / values deterministically
 - `refusals` — bad authoring, bad compiled artifacts, missing fields, missing
@@ -1205,8 +1504,12 @@ Named test suites should exist before calling v0 complete:
 - `cli_key_conflict` — conflicting authored `key_fields` and shortcut `--key`
   refuse with `E_KEY_CONFLICT`
 - `embedding_equivalence` — portable rules emit identical results in batch and
-  embedded execution
+  embedded execution; legacy single-binding predicates remain portable after
+  the binding-qualified extension
 - `determinism` — repeated runs keep report ordering and serialization stable
+  for identical artifact/input bytes; row-order permutations select the same
+  semantic results and first refusal after identity hashes are excluded,
+  including binding-qualified PASS, FAIL, and refusal cases
 
 ## Quality gates
 
@@ -1290,6 +1593,55 @@ cargo test
 - add determinism suite across repeated runs
 - freeze refusal snapshots
 - run the full quality gate on a representative fixture corpus
+
+### D10. Add binding-qualified batch predicates (post-v0)
+
+This extension lands in dependency order and must not be implemented as one
+cross-crate file grab:
+
+1. **Protocol and core types** — amend this plan; add optional
+   `ColumnReference.binding`, schema support, new refusal codes, and stable
+   serialization tests. Omission must retain existing artifact bytes.
+2. **Structured authoring and validation** — collect every binding reference,
+   derive portability, reject declared/derived mismatches, validate key
+   declarations and arity, and keep SQL authoring scoped to `query_zero_rows`.
+3. **DuckDB lowering and execution** — add a dedicated batch predicate executor
+   over the existing `BatchContext`, including field/type preflight, key
+   uniqueness, counterpart resolution, deterministic AST lowering, and
+   localized results.
+4. **CLI integration and conformance fixtures** — route portable predicates to
+   `verify-engine`, route binding-qualified predicates to `verify-duckdb`, map
+   every new error to its refusal envelope, and prove PASS/FAIL/refusal plus
+   deterministic ordering end to end.
+
+Steps 2 and 3 depend on step 1. Step 4 depends on both. Portable/embedded
+lowering is explicitly outside D10 and remains a later feature guarded by a
+batch-versus-embedded differential conformance suite.
+
+## Acceptance criteria for binding-qualified batch predicates
+
+The post-v0 extension is complete only when all of the following hold:
+
+- existing constraint fixtures serialize byte-identically and retain portable
+  behavior
+- optional `ColumnReference.binding` round-trips through schema, core types,
+  JSON/YAML authoring, compile, validate, and run
+- declared bindings and derived portability are validated recursively across
+  the full expression AST
+- the complete v0 predicate grammar executes over binding-qualified operands in
+  one existing DuckDB batch context without exposing SQL authoring
+- every key, field, counterpart, and scalar-comparability precondition has a
+  stable refusal code and actionable detail
+- PASS and FAIL results use the anchor row domain and produce deterministic,
+  anchor-localized affected entries
+- embedded execution refuses the new batch-only form with
+  `E_BATCH_ONLY_RULE`, while existing single-binding predicates preserve
+  batch/embedded parity
+- repeated execution over identical compiled and bound bytes is byte-identical;
+  physical row-order permutations preserve semantic results and refusal choice
+  after the intentionally different input hashes are excluded
+- schema, compile, validate, DuckDB executor, CLI, refusal, embedded, and
+  determinism tests cover the extension before it is advertised
 
 ## Acceptance criteria for v0
 
