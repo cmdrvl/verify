@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use verify_core::{
     constraint::{Check, MembershipOperand, PredicateExpression, PredicateOperand, Rule},
     report::{AffectedEntry, ResultStatus, RuleResult},
@@ -10,6 +10,17 @@ use verify_core::{
 use crate::Relation;
 
 pub const PORTABLE_ROW_OPS: &[&str] = &["unique", "not_null", "predicate"];
+
+/// Localized context for an invalid scalar comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomparableOperandsDetail {
+    pub operator: String,
+    pub left_type: String,
+    pub right_type: String,
+    pub binding: String,
+    pub key: Option<BTreeMap<String, Value>>,
+    pub field: Option<String>,
+}
 
 /// Errors that can occur during portable rule evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +31,8 @@ pub enum EngineError {
     UnsupportedOp(String),
     /// Invalid predicate expression structure.
     BadExpression(String),
+    /// Predicate operands do not belong to comparable scalar categories.
+    IncomparableOperands(Box<IncomparableOperandsDetail>),
 }
 
 impl std::fmt::Display for EngineError {
@@ -28,6 +41,33 @@ impl std::fmt::Display for EngineError {
             Self::MissingBinding(name) => write!(f, "binding not found: {name}"),
             Self::UnsupportedOp(op) => write!(f, "unsupported op for portable row engine: {op}"),
             Self::BadExpression(msg) => write!(f, "bad predicate expression: {msg}"),
+            Self::IncomparableOperands(detail) => write!(
+                f,
+                "predicate operator {} cannot compare {} with {}",
+                detail.operator, detail.left_type, detail.right_type
+            ),
+        }
+    }
+}
+
+impl EngineError {
+    pub const fn is_bad_expression(&self) -> bool {
+        matches!(self, Self::BadExpression(_) | Self::IncomparableOperands(_))
+    }
+
+    pub fn detail(&self) -> Value {
+        match self {
+            Self::MissingBinding(binding) => json!({ "binding": binding }),
+            Self::UnsupportedOp(op) => json!({ "op": op }),
+            Self::BadExpression(detail) => json!({ "detail": detail }),
+            Self::IncomparableOperands(detail) => json!({
+                "operator": detail.operator,
+                "left_type": detail.left_type,
+                "right_type": detail.right_type,
+                "binding": detail.binding,
+                "key": detail.key,
+                "field": detail.field,
+            }),
         }
     }
 }
@@ -193,7 +233,12 @@ fn evaluate_predicate(
     let mut affected = Vec::new();
 
     for row in &relation.rows {
-        if !evaluate_expr(expr, row)? {
+        let context = ExpressionContext {
+            binding,
+            key_fields: &relation.key_fields,
+            row,
+        };
+        if !evaluate_expr(expr, context)? {
             let (field, value) = extract_predicate_localization(expr, row);
             affected.push(AffectedEntry {
                 binding: binding.to_owned(),
@@ -209,79 +254,90 @@ fn evaluate_predicate(
 
 // --- Predicate expression evaluator ---
 
+#[derive(Debug, Clone, Copy)]
+struct ExpressionContext<'a> {
+    binding: &'a str,
+    key_fields: &'a [String],
+    row: &'a BTreeMap<String, Value>,
+}
+
 fn evaluate_expr(
     expr: &PredicateExpression,
-    row: &BTreeMap<String, Value>,
+    context: ExpressionContext<'_>,
 ) -> Result<bool, EngineError> {
     match expr {
         PredicateExpression::Column(col_ref) => {
-            let value = row.get(&col_ref.column).unwrap_or(&Value::Null);
+            let value = context.row.get(&col_ref.column).unwrap_or(&Value::Null);
             Ok(!is_blank(value))
         }
         PredicateExpression::Eq { eq } => {
-            let left = resolve_operand(&eq[0], row);
-            let right = resolve_operand(&eq[1], row);
-            Ok(values_equal(&left, &right))
+            let left = resolve_operand(&eq[0], context.row);
+            let right = resolve_operand(&eq[1], context.row);
+            values_equal("eq", &left, &right, context, binary_field(eq).as_deref())
         }
         PredicateExpression::Ne { ne } => {
-            let left = resolve_operand(&ne[0], row);
-            let right = resolve_operand(&ne[1], row);
-            Ok(!values_equal(&left, &right))
+            let left = resolve_operand(&ne[0], context.row);
+            let right = resolve_operand(&ne[1], context.row);
+            values_equal("ne", &left, &right, context, binary_field(ne).as_deref())
+                .map(|equal| !equal)
         }
         PredicateExpression::Gt { gt } => {
-            let left = resolve_operand(&gt[0], row);
-            let right = resolve_operand(&gt[1], row);
-            Ok(compare_values(&left, &right) == Some(Ordering::Greater))
+            let left = resolve_operand(&gt[0], context.row);
+            let right = resolve_operand(&gt[1], context.row);
+            compare_values("gt", &left, &right, context, binary_field(gt).as_deref())
+                .map(|ordering| ordering == Ordering::Greater)
         }
         PredicateExpression::Gte { gte } => {
-            let left = resolve_operand(&gte[0], row);
-            let right = resolve_operand(&gte[1], row);
-            Ok(matches!(
-                compare_values(&left, &right),
-                Some(Ordering::Greater | Ordering::Equal)
-            ))
+            let left = resolve_operand(&gte[0], context.row);
+            let right = resolve_operand(&gte[1], context.row);
+            compare_values("gte", &left, &right, context, binary_field(gte).as_deref())
+                .map(|ordering| matches!(ordering, Ordering::Greater | Ordering::Equal))
         }
         PredicateExpression::Lt { lt } => {
-            let left = resolve_operand(&lt[0], row);
-            let right = resolve_operand(&lt[1], row);
-            Ok(compare_values(&left, &right) == Some(Ordering::Less))
+            let left = resolve_operand(&lt[0], context.row);
+            let right = resolve_operand(&lt[1], context.row);
+            compare_values("lt", &left, &right, context, binary_field(lt).as_deref())
+                .map(|ordering| ordering == Ordering::Less)
         }
         PredicateExpression::Lte { lte } => {
-            let left = resolve_operand(&lte[0], row);
-            let right = resolve_operand(&lte[1], row);
-            Ok(matches!(
-                compare_values(&left, &right),
-                Some(Ordering::Less | Ordering::Equal)
-            ))
+            let left = resolve_operand(&lte[0], context.row);
+            let right = resolve_operand(&lte[1], context.row);
+            compare_values("lte", &left, &right, context, binary_field(lte).as_deref())
+                .map(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal))
         }
         PredicateExpression::And { and } => {
+            let mut result = true;
             for sub in and {
-                if !evaluate_expr(sub, row)? {
-                    return Ok(false);
-                }
+                result &= evaluate_expr(sub, context)?;
             }
-            Ok(true)
+            Ok(result)
         }
         PredicateExpression::Or { or } => {
+            let mut result = false;
             for sub in or {
-                if evaluate_expr(sub, row)? {
-                    return Ok(true);
+                result |= evaluate_expr(sub, context)?;
+            }
+            Ok(result)
+        }
+        PredicateExpression::Not { not } => Ok(!evaluate_expr(not, context)?),
+        PredicateExpression::In { r#in } => {
+            let value = resolve_membership_value(&r#in[0], context.row)?;
+            let set = resolve_membership_set(&r#in[1])?;
+            let field = membership_field(&r#in[0]);
+            let mut matched = false;
+            for member in set {
+                if values_equal("in", &value, member, context, field.as_deref())? {
+                    matched = true;
                 }
             }
-            Ok(false)
-        }
-        PredicateExpression::Not { not } => Ok(!evaluate_expr(not, row)?),
-        PredicateExpression::In { r#in } => {
-            let value = resolve_membership_value(&r#in[0], row)?;
-            let set = resolve_membership_set(&r#in[1])?;
-            Ok(set.iter().any(|member| values_equal(&value, member)))
+            Ok(matched)
         }
         PredicateExpression::IsNull { is_null: col_ref } => {
-            let value = row.get(&col_ref.column).unwrap_or(&Value::Null);
+            let value = context.row.get(&col_ref.column).unwrap_or(&Value::Null);
             Ok(matches!(value, Value::Null))
         }
         PredicateExpression::IsBlank { is_blank: col_ref } => {
-            let value = row.get(&col_ref.column).unwrap_or(&Value::Null);
+            let value = context.row.get(&col_ref.column).unwrap_or(&Value::Null);
             Ok(is_blank(value))
         }
     }
@@ -319,25 +375,86 @@ fn resolve_membership_set(operand: &MembershipOperand) -> Result<&[Value], Engin
 
 // --- Value comparison ---
 
-fn values_equal(left: &Value, right: &Value) -> bool {
+fn values_equal(
+    operator: &str,
+    left: &Value,
+    right: &Value,
+    context: ExpressionContext<'_>,
+    field: Option<&str>,
+) -> Result<bool, EngineError> {
     match (left, right) {
         (Value::Number(l), Value::Number(r)) => match (l.as_f64(), r.as_f64()) {
-            (Some(lf), Some(rf)) => lf == rf,
-            _ => false,
+            (Some(lf), Some(rf)) => Ok(lf == rf),
+            _ => Err(incomparable_error(operator, left, right, context, field)),
         },
-        _ => left == right,
+        (Value::String(left), Value::String(right)) => Ok(left == right),
+        (Value::Bool(left), Value::Bool(right)) => Ok(left == right),
+        (Value::Null, Value::Null) => Ok(true),
+        (Value::Null, _) | (_, Value::Null) => Ok(false),
+        _ => Err(incomparable_error(operator, left, right, context, field)),
     }
 }
 
-fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
+fn compare_values(
+    operator: &str,
+    left: &Value,
+    right: &Value,
+    context: ExpressionContext<'_>,
+    field: Option<&str>,
+) -> Result<Ordering, EngineError> {
     match (left, right) {
-        (Value::Number(l), Value::Number(r)) => {
-            l.as_f64().zip(r.as_f64()).map(|(lf, rf)| lf.total_cmp(&rf))
+        (Value::Number(left_number), Value::Number(right_number)) => left_number
+            .as_f64()
+            .zip(right_number.as_f64())
+            .map(|(left, right)| left.total_cmp(&right))
+            .ok_or_else(|| incomparable_error(operator, left, right, context, field)),
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        _ => Err(incomparable_error(operator, left, right, context, field)),
+    }
+}
+
+fn incomparable_error(
+    operator: &str,
+    left: &Value,
+    right: &Value,
+    context: ExpressionContext<'_>,
+    field: Option<&str>,
+) -> EngineError {
+    EngineError::IncomparableOperands(Box::new(IncomparableOperandsDetail {
+        operator: operator.to_owned(),
+        left_type: value_type(left).to_owned(),
+        right_type: value_type(right).to_owned(),
+        binding: context.binding.to_owned(),
+        key: extract_key(context.row, context.key_fields),
+        field: field.map(ToOwned::to_owned),
+    }))
+}
+
+fn value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn binary_field(operands: &[PredicateOperand; 2]) -> Option<String> {
+    operands.iter().find_map(|operand| match operand {
+        PredicateOperand::Column(column) => Some(column.column.clone()),
+        PredicateOperand::Literal(_) => None,
+    })
+}
+
+fn membership_field(operand: &MembershipOperand) -> Option<String> {
+    match operand {
+        MembershipOperand::Operand(PredicateOperand::Column(column)) => Some(column.column.clone()),
+        MembershipOperand::Set(_) | MembershipOperand::Operand(PredicateOperand::Literal(_)) => {
+            None
         }
-        (Value::String(l), Value::String(r)) => Some(l.cmp(r)),
-        (Value::Bool(l), Value::Bool(r)) => Some(l.cmp(r)),
-        (Value::Null, Value::Null) => Some(Ordering::Equal),
-        _ => None,
     }
 }
 
@@ -1028,6 +1145,112 @@ mod tests {
         let result = evaluate_rule(&rule_null, &rels).unwrap();
         // is_null predicate: only null passes, "" and "val" fail
         assert_eq!(result.violation_count, 2);
+    }
+
+    #[test]
+    fn predicate_type_mismatches_refuse_for_every_comparison_operator() {
+        let cases = [
+            ("eq", json!({ "eq": [{ "column": "value" }, "0"] })),
+            ("ne", json!({ "ne": [{ "column": "value" }, "0"] })),
+            ("gt", json!({ "gt": [{ "column": "value" }, "0"] })),
+            ("gte", json!({ "gte": [{ "column": "value" }, "0"] })),
+            ("lt", json!({ "lt": [{ "column": "value" }, "0"] })),
+            ("lte", json!({ "lte": [{ "column": "value" }, "0"] })),
+            ("in", json!({ "in": [{ "column": "value" }, ["0", "1"]] })),
+            (
+                "eq",
+                json!({ "not": { "eq": [{ "column": "value" }, "0"] } }),
+            ),
+            (
+                "eq",
+                json!({
+                    "or": [
+                        { "eq": [1, 1] },
+                        { "eq": [{ "column": "value" }, "0"] }
+                    ]
+                }),
+            ),
+        ];
+        let rels = relations_with(
+            "input",
+            &["id"],
+            vec![row(&[("id", json!("row-1")), ("value", json!(0))])],
+        );
+
+        for (expected_operator, expression) in cases {
+            let expr: PredicateExpression =
+                serde_json::from_value(expression).expect("test expression should parse");
+            let rule = make_rule(
+                "TYPE_STRICT",
+                Severity::Error,
+                Check::Predicate {
+                    binding: "input".to_owned(),
+                    expr,
+                },
+            );
+
+            let error = evaluate_rule(&rule, &rels).expect_err("type mismatch must refuse");
+            assert!(matches!(error, super::EngineError::IncomparableOperands(_)));
+            let super::EngineError::IncomparableOperands(detail) = error else {
+                return;
+            };
+            assert_eq!(detail.operator, expected_operator);
+            assert_eq!(detail.left_type, "number");
+            assert_eq!(detail.right_type, "string");
+            assert_eq!(detail.binding, "input");
+            assert_eq!(
+                detail.key.and_then(|key| key.get("id").cloned()),
+                Some(json!("row-1"))
+            );
+            assert_eq!(detail.field.as_deref(), Some("value"));
+        }
+    }
+
+    #[test]
+    fn predicate_null_comparison_semantics_are_explicit() {
+        let rels = relations_with(
+            "input",
+            &["id"],
+            vec![row(&[("id", json!("row-1")), ("value", Value::Null)])],
+        );
+        let cases = [
+            (json!({ "eq": [{ "column": "value" }, null] }), true),
+            (json!({ "eq": [{ "column": "value" }, 0] }), false),
+            (json!({ "ne": [{ "column": "value" }, 0] }), true),
+            (json!({ "in": [{ "column": "value" }, [null, 0]] }), true),
+        ];
+
+        for (expression, should_pass) in cases {
+            let expr = serde_json::from_value(expression).expect("test expression should parse");
+            let rule = make_rule(
+                "NULL_SEMANTICS",
+                Severity::Error,
+                Check::Predicate {
+                    binding: "input".to_owned(),
+                    expr,
+                },
+            );
+            let result = evaluate_rule(&rule, &rels).expect("equality with null is defined");
+            assert_eq!(matches!(result.status, ResultStatus::Pass), should_pass);
+        }
+
+        let ordered_null = make_rule(
+            "NULL_ORDERING",
+            Severity::Error,
+            Check::Predicate {
+                binding: "input".to_owned(),
+                expr: serde_json::from_value(json!({
+                    "gte": [{ "column": "value" }, null]
+                }))
+                .expect("test expression should parse"),
+            },
+        );
+        let error = evaluate_rule(&ordered_null, &rels).expect_err("null has no ordering");
+        assert!(matches!(
+            error,
+            super::EngineError::IncomparableOperands(detail)
+                if detail.left_type == "null" && detail.right_type == "null"
+        ));
     }
 
     // --- error handling tests ---

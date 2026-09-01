@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use verify_core::{
     constraint::{
-        Aggregate, Binding, BindingKind, Check, Comparison, ConstraintSet, Portability, Rule,
-        Severity,
+        Aggregate, Binding, BindingKind, Check, Comparison, ConstraintSet, Portability,
+        PredicateExpression, Rule, Severity,
     },
     order::sort_report,
     refusal::RefusalCode,
@@ -304,4 +304,56 @@ fn embedded_executor_refuses_batch_only_rules() {
             "execution_mode": "embedded",
         })
     );
+}
+
+#[test]
+fn embedded_executor_refuses_incomparable_predicate_operands_with_context() {
+    let constraints = ConstraintSet {
+        version: verify_core::CONSTRAINT_VERSION.to_owned(),
+        constraint_set_id: "embedded.incomparable.v1".to_owned(),
+        bindings: vec![Binding {
+            name: "loans".to_owned(),
+            kind: BindingKind::Relation,
+            key_fields: vec!["loan_id".to_owned()],
+        }],
+        rules: vec![Rule {
+            id: "AMOUNT_IS_ZERO".to_owned(),
+            severity: Severity::Error,
+            portability: Portability::Portable,
+            check: Check::Predicate {
+                binding: "loans".to_owned(),
+                expr: serde_json::from_value::<PredicateExpression>(json!({
+                    "eq": [{ "column": "amount" }, "0"]
+                }))
+                .expect("predicate should parse"),
+            },
+        }],
+    };
+    let bindings = BTreeMap::from([(
+        "loans".to_owned(),
+        EmbeddedBinding::new(
+            "embedded://loans",
+            "sha256:loans",
+            Relation::new(
+                vec!["loan_id".to_owned()],
+                vec![BTreeMap::from([
+                    ("loan_id".to_owned(), json!("LN-100")),
+                    ("amount".to_owned(), json!(0)),
+                ])],
+            ),
+        ),
+    )]);
+
+    let report = EmbeddedExecutor::evaluate(&constraints, "sha256:constraint", &bindings);
+    let refusal = report.refusal.expect("type mismatch should refuse");
+
+    assert_eq!(report.outcome, Outcome::Refusal);
+    assert_eq!(refusal.code, RefusalCode::BadExpr);
+    assert_eq!(refusal.detail["rule_id"], "AMOUNT_IS_ZERO");
+    assert_eq!(refusal.detail["operator"], "eq");
+    assert_eq!(refusal.detail["left_type"], "number");
+    assert_eq!(refusal.detail["right_type"], "string");
+    assert_eq!(refusal.detail["binding"], "loans");
+    assert_eq!(refusal.detail["key"]["loan_id"], "LN-100");
+    assert_eq!(refusal.detail["field"], "amount");
 }

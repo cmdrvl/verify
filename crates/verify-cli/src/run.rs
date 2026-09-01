@@ -5,7 +5,7 @@ use clap::{ArgAction, Args};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use verify_core::{
-    constraint::{Check, ConstraintSet},
+    constraint::{Check, ConstraintSet, Rule},
     order::sort_report,
     refusal::RefusalCode,
     report::{ExecutionMode, InputVerification, Outcome, VerifyReport},
@@ -345,14 +345,7 @@ fn evaluate_batch(
             Check::QueryZeroRows { .. } => continue,
             Check::Unique { .. } | Check::NotNull { .. } | Check::Predicate { .. } => {
                 portable_row::evaluate_rule(rule, &relations).map_err(|error| {
-                    VerifyReport::refusal(
-                        ExecutionMode::Batch,
-                        constraints.constraint_set_id.clone(),
-                        constraint_hash,
-                        RefusalCode::BadConstraints,
-                        format!("portable rule evaluation error: {error}"),
-                        json!({ "rule_id": rule.id, "error": error.to_string() }),
-                    )
+                    portable_row_refusal(constraints, constraint_hash, rule, &error)
                 })?
             }
             Check::RowCount { .. } | Check::AggregateCompare { .. } | Check::ForeignKey { .. } => {
@@ -395,6 +388,32 @@ fn evaluate_batch(
     sort_report(&mut report);
 
     Ok(report)
+}
+
+fn portable_row_refusal(
+    constraints: &ConstraintSet,
+    constraint_hash: &str,
+    rule: &Rule,
+    error: &portable_row::EngineError,
+) -> VerifyReport {
+    let code = if error.is_bad_expression() {
+        RefusalCode::BadExpr
+    } else {
+        RefusalCode::BadConstraints
+    };
+    let mut detail = error.detail();
+    if let Value::Object(fields) = &mut detail {
+        fields.insert("rule_id".to_owned(), Value::String(rule.id.clone()));
+    }
+
+    VerifyReport::refusal(
+        ExecutionMode::Batch,
+        constraints.constraint_set_id.clone(),
+        constraint_hash,
+        code,
+        format!("portable rule evaluation error: {error}"),
+        detail,
+    )
 }
 
 // ---------------------------------------------------------------------------

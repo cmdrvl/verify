@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::CONSTRAINT_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConstraintSet {
     pub version: String,
     pub constraint_set_id: String,
@@ -29,6 +30,7 @@ impl Default for ConstraintSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub name: String,
     pub kind: BindingKind,
@@ -44,6 +46,7 @@ pub enum BindingKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     pub id: String,
     pub severity: Severity,
@@ -66,7 +69,7 @@ pub enum Portability {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Check {
     Unique {
         binding: String,
@@ -116,7 +119,7 @@ impl Check {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum PredicateExpression {
     Column(ColumnReference),
     Eq { eq: [PredicateOperand; 2] },
@@ -134,25 +137,65 @@ pub enum PredicateExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnReference {
     pub column: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum PredicateOperand {
     Column(ColumnReference),
     Literal(Value),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for PredicateOperand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Object(_) => ColumnReference::deserialize(value)
+                .map(Self::Column)
+                .map_err(D::Error::custom),
+            Value::Array(_) => Err(D::Error::custom("predicate literals must be scalar values")),
+            scalar => Ok(Self::Literal(scalar)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum MembershipOperand {
     Set(Vec<Value>),
     Operand(PredicateOperand),
 }
 
+impl<'de> Deserialize<'de> for MembershipOperand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Array(values) => {
+                if values.iter().any(Value::is_array) || values.iter().any(Value::is_object) {
+                    return Err(D::Error::custom(
+                        "predicate membership sets may contain only scalar values",
+                    ));
+                }
+                Ok(Self::Set(values))
+            }
+            operand => PredicateOperand::deserialize(operand)
+                .map(Self::Operand)
+                .map_err(D::Error::custom),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Comparison {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eq: Option<Value>,
@@ -171,6 +214,7 @@ pub struct Comparison {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Aggregate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sum: Option<String>,
@@ -383,5 +427,95 @@ mod tests {
 
             assert_eq!(round_tripped, expected);
         }
+    }
+
+    fn minimal_predicate_artifact() -> serde_json::Value {
+        json!({
+            "version": CONSTRAINT_VERSION,
+            "constraint_set_id": "strict.predicate.v1",
+            "bindings": [
+                { "name": "input", "kind": "relation", "key_fields": ["id"] }
+            ],
+            "rules": [
+                {
+                    "id": "VALUE_PRESENT",
+                    "severity": "error",
+                    "portability": "portable",
+                    "check": {
+                        "op": "predicate",
+                        "binding": "input",
+                        "expr": { "column": "value" }
+                    }
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn rejects_unknown_fields_at_every_compiled_constraint_boundary() {
+        let mut cases = Vec::new();
+
+        let mut top_level = minimal_predicate_artifact();
+        top_level["unexpected"] = json!(true);
+        cases.push(("top level", top_level));
+
+        let mut binding = minimal_predicate_artifact();
+        binding["bindings"][0]["unexpected"] = json!(true);
+        cases.push(("binding", binding));
+
+        let mut rule = minimal_predicate_artifact();
+        rule["rules"][0]["unexpected"] = json!(true);
+        cases.push(("rule", rule));
+
+        let mut check = minimal_predicate_artifact();
+        check["rules"][0]["check"]["unexpected"] = json!(true);
+        cases.push(("check", check));
+
+        let mut expression = minimal_predicate_artifact();
+        expression["rules"][0]["check"]["expr"] = json!({
+            "eq": [{ "column": "value" }, 1],
+            "unexpected": true
+        });
+        cases.push(("predicate expression", expression));
+
+        let mut column = minimal_predicate_artifact();
+        column["rules"][0]["check"]["expr"]["binding"] = json!("other");
+        cases.push(("column reference", column));
+
+        for (boundary, artifact) in cases {
+            let error = serde_json::from_value::<ConstraintSet>(artifact)
+                .expect_err("unknown fields must be rejected");
+            assert!(
+                error.to_string().contains("unknown field")
+                    || error.to_string().contains("did not match any variant"),
+                "{boundary} produced an unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_objects_cannot_fall_back_to_literals() {
+        for invalid in [
+            json!({ "eq": [{ "column": "value" }, { "binding": "old", "column": "value" }] }),
+            json!({ "eq": [{ "column": "value" }, [1, 2]] }),
+            json!({ "in": [{ "column": "value" }, [1, { "nested": true }]] }),
+        ] {
+            serde_json::from_value::<PredicateExpression>(invalid)
+                .expect_err("non-scalar predicate literals must be rejected");
+        }
+    }
+
+    #[test]
+    fn predicate_scalar_literals_and_membership_sets_remain_valid() {
+        for scalar in [json!(null), json!(true), json!(1), json!("one")] {
+            let expression = json!({ "eq": [{ "column": "value" }, scalar] });
+            serde_json::from_value::<PredicateExpression>(expression)
+                .expect("declared scalar predicate literal should parse");
+        }
+
+        serde_json::from_value::<PredicateExpression>(json!({
+            "in": [{ "column": "value" }, [null, true, 1, "one"]]
+        }))
+        .expect("scalar membership set should parse");
     }
 }

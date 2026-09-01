@@ -31,6 +31,10 @@ path = "../../tests/determinism.rs"
 name = "portable_rules"
 path = "../../tests/portable_rules.rs"
 
+[[test]]
+name = "refusals"
+path = "../../tests/refusals.rs"
+
 [dependencies]
 clap.workspace = true
 duckdb = "1.4.4"

@@ -94,7 +94,26 @@ fn check_binding_names(check: &Check) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::PathBuf;
+
     use super::{ValidateArgs, execute};
+
+    fn reserve_temp_directory(stem: &str) -> io::Result<PathBuf> {
+        for suffix in 0..1_024 {
+            let candidate = std::env::temp_dir().join(format!("{stem}-{suffix}"));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a temporary test directory",
+        ))
+    }
 
     #[test]
     fn validates_good_arity1_fixture() {
@@ -161,5 +180,41 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_compiled_artifacts() {
+        let directory = reserve_temp_directory("verify-validate-unknown")
+            .expect("temporary directory should be reserved");
+        let path = directory.join("constraints.verify.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": "verify.constraint.v1",
+                "constraint_set_id": "invalid.unknown_field",
+                "bindings": [{"name": "input", "kind": "relation"}],
+                "rules": [{
+                    "id": "VALUE_PRESENT",
+                    "severity": "error",
+                    "portability": "portable",
+                    "check": {
+                        "op": "predicate",
+                        "binding": "input",
+                        "expr": {"column": "value", "binding": "other"}
+                    }
+                }]
+            }"#,
+        )
+        .expect("temporary compiled artifact should be written");
+
+        let result = execute(ValidateArgs {
+            compiled_constraints: path.clone(),
+            json: false,
+        });
+        fs::remove_file(path).ok();
+        fs::remove_dir(directory).ok();
+
+        let error = result.expect_err("unknown fields must be rejected");
+        assert!(error.contains("invalid compiled constraints"));
     }
 }

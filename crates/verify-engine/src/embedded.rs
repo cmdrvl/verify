@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use verify_core::{
     constraint::{BindingKind, Check, ConstraintSet, Portability, Rule},
     order::sort_report,
@@ -60,7 +60,7 @@ enum EmbeddedEvaluationError {
     MissingBinding(String),
     UndeclaredBinding(String),
     FieldNotFound { binding: String, field: String },
-    BadExpr(String),
+    BadExpr { message: String, detail: Value },
     BadConstraints(String),
     BatchOnlyRule { rule_id: String, op: String },
 }
@@ -225,7 +225,15 @@ fn refusal_report(
 impl EmbeddedEvaluationError {
     fn with_rule(self, rule: &Rule) -> Self {
         match self {
-            Self::BadExpr(message) => Self::BadExpr(format!("{message} [rule_id={}]", rule.id)),
+            Self::BadExpr {
+                message,
+                mut detail,
+            } => {
+                if let Value::Object(fields) = &mut detail {
+                    fields.insert("rule_id".to_owned(), Value::String(rule.id.clone()));
+                }
+                Self::BadExpr { message, detail }
+            }
             Self::BadConstraints(message) => {
                 Self::BadConstraints(format!("{message} [rule_id={}]", rule.id))
             }
@@ -253,10 +261,10 @@ impl EmbeddedEvaluationError {
                     "field": field,
                 }),
             ),
-            Self::BadExpr(detail) => (
+            Self::BadExpr { message, detail } => (
                 RefusalCode::BadExpr,
-                format!("embedded execution could not evaluate rule expression: {detail}"),
-                json!({ "detail": detail }),
+                format!("embedded execution could not evaluate rule expression: {message}"),
+                detail,
             ),
             Self::BadConstraints(detail) => (
                 RefusalCode::BadConstraints,
@@ -281,7 +289,11 @@ impl From<portable_row::EngineError> for EmbeddedEvaluationError {
         match value {
             portable_row::EngineError::MissingBinding(binding) => Self::MissingBinding(binding),
             portable_row::EngineError::UnsupportedOp(op) => Self::BadConstraints(op),
-            portable_row::EngineError::BadExpression(detail) => Self::BadExpr(detail),
+            error @ (portable_row::EngineError::BadExpression(_)
+            | portable_row::EngineError::IncomparableOperands(_)) => Self::BadExpr {
+                message: error.to_string(),
+                detail: error.detail(),
+            },
         }
     }
 }
@@ -296,7 +308,10 @@ impl From<portable_relation::RelationEngineError> for EmbeddedEvaluationError {
                 Self::FieldNotFound { binding, field }
             }
             portable_relation::RelationEngineError::UnsupportedOp(op) => Self::BadConstraints(op),
-            portable_relation::RelationEngineError::BadExpression(detail) => Self::BadExpr(detail),
+            portable_relation::RelationEngineError::BadExpression(detail) => Self::BadExpr {
+                message: detail.clone(),
+                detail: json!({ "detail": detail }),
+            },
         }
     }
 }

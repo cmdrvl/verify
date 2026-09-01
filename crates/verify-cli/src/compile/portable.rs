@@ -621,4 +621,32 @@ rules:
             other => Err(format!("expected bad authoring error, got {other:?}")),
         }
     }
+
+    #[test]
+    fn rejects_binding_qualified_column_references_before_feature_support() {
+        let error = compile_source(
+            r#"
+constraint_set_id: invalid.cross_binding_predicate
+bindings:
+  old: { key_fields: [id] }
+  new: { key_fields: [id] }
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    binding: new
+    op: predicate
+    expr:
+      eq:
+        - { binding: old, column: value }
+        - { binding: new, column: value }
+"#,
+        )
+        .expect_err("unknown column-reference fields must not compile");
+
+        assert!(matches!(error, CompileError::BadAuthoring { .. }));
+        let CompileError::BadAuthoring { message, .. } = error else {
+            return;
+        };
+        assert!(message.contains("predicate expression is invalid"));
+    }
 }

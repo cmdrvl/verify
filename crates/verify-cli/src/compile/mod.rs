@@ -64,9 +64,26 @@ fn write_output(path: &Path, rendered: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
 
     use super::{CompileArgs, execute, portable, query};
+
+    fn reserve_temp_directory(stem: &str) -> io::Result<PathBuf> {
+        for suffix in 0..1_024 {
+            let candidate = std::env::temp_dir().join(format!("{stem}-{suffix}"));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a temporary test directory",
+        ))
+    }
 
     #[test]
     fn yaml_authoring_routes_to_portable_surface() {
@@ -124,5 +141,52 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn invalid_predicate_authoring_does_not_write_an_artifact() {
+        let directory = reserve_temp_directory("verify-invalid-predicate")
+            .expect("temporary directory should be reserved");
+        let authoring = directory.join("authoring.yaml");
+        let output = directory.join("compiled.verify.json");
+        fs::write(
+            &authoring,
+            r#"
+constraint_set_id: invalid.cross_binding_predicate
+bindings:
+  old: { key_fields: [id] }
+  new: { key_fields: [id] }
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    binding: new
+    op: predicate
+    expr:
+      eq:
+        - { binding: old, column: value }
+        - { binding: new, column: value }
+"#,
+        )
+        .expect("temporary authoring should be written");
+
+        let result = execute(CompileArgs {
+            authoring: Some(authoring.clone()),
+            output: Some(output.clone()),
+            check: false,
+            schema: false,
+            json: false,
+        });
+
+        let output_was_written = output.exists();
+        fs::remove_file(authoring).ok();
+        fs::remove_file(output).ok();
+        fs::remove_dir(directory).ok();
+
+        let error = result.expect_err("invalid authoring must be rejected");
+        assert!(error.contains("E_BAD_AUTHORING"));
+        assert!(
+            !output_was_written,
+            "no compiled artifact should be written"
+        );
     }
 }

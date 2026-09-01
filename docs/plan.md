@@ -521,6 +521,31 @@ operator in v0. Example:
 This is the minimum needed to express structural tournament rules without
 smuggling hidden semantics into the evaluator.
 
+#### Predicate scalar comparability
+
+Predicate comparisons are type-strict. Executors must not inherit coercion
+behavior from an input reader, SQL engine, or host language.
+
+- number compares with number
+- string compares with string
+- boolean compares with boolean
+- `eq`, `ne`, and `in` treat null as an explicit absence value: null equals
+  null, while null and a present scalar are unequal
+- ordered comparisons (`gt`, `gte`, `lt`, `lte`) involving null refuse because
+  absence has no ordering
+- arrays and objects are not scalar predicate literals and must be rejected at
+  authoring or compiled-artifact parsing boundaries
+- any other cross-type comparison refuses with `E_BAD_EXPR`; it must not become
+  an ordinary true or false predicate result
+- boolean composition checks comparability in every branch even when normal
+  boolean short-circuiting could determine the row verdict earlier
+
+An incomparability refusal identifies the rule, operator, operand categories,
+binding, and available key/field context. Batch and embedded execution must
+produce the same refusal semantics. In particular, a numeric cell compared with
+the string literal `"0"` refuses rather than relying on implicit coercion or
+evaluating as unequal.
+
 #### `query_zero_rows` localization contract
 
 `query_zero_rows` must not stop at row counting. It needs a deterministic map
@@ -1115,6 +1140,17 @@ E_UNDECLARED_BINDING:
 
 E_FIELD_NOT_FOUND:
   { "rule_id": "POSITIVE_BALANCE", "binding": "input", "field": "balance" }
+
+E_BAD_EXPR (runtime scalar incomparability):
+  {
+    "rule_id": "POSITIVE_BALANCE",
+    "operator": "gt",
+    "left_type": "number",
+    "right_type": "string",
+    "binding": "input",
+    "key": { "loan_id": "LN-00421" },
+    "field": "balance"
+  }
 
 E_KEY_CONFLICT:
   {
