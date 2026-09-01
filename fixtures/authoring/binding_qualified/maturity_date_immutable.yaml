@@ -1,0 +1,20 @@
+constraint_set_id: fixtures.binding_qualified.maturity_date_immutable
+bindings:
+  current:
+    key_fields:
+      - loan_id
+      - tranche_id
+  prior:
+    key_fields:
+      - asset_number
+      - class_code
+rules:
+  - id: MATURITY_DATE_IMMUTABLE
+    severity: error
+    binding: current
+    op: predicate
+    expr:
+      eq:
+        - column: maturity_date
+        - binding: prior
+          column: maturity_date

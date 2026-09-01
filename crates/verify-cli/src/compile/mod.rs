@@ -159,6 +159,7 @@ bindings:
 rules:
   - id: VALUE_IMMUTABLE
     severity: error
+    portability: portable
     binding: new
     op: predicate
     expr:
@@ -188,5 +189,36 @@ rules:
             !output_was_written,
             "no compiled artifact should be written"
         );
+    }
+
+    #[test]
+    fn binding_qualified_fixture_compiles_to_identical_output_bytes_twice() {
+        let directory = reserve_temp_directory("verify-binding-qualified-compile")
+            .expect("temporary directory should be reserved");
+        let authoring = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/authoring/binding_qualified/maturity_date_immutable.yaml"
+        ));
+        let first = directory.join("first.verify.json");
+        let second = directory.join("second.verify.json");
+
+        for output in [&first, &second] {
+            execute(CompileArgs {
+                authoring: Some(authoring.clone()),
+                output: Some(output.clone()),
+                check: false,
+                schema: false,
+                json: false,
+            })
+            .expect("binding-qualified fixture should compile");
+        }
+
+        let first_bytes = fs::read(&first).expect("first artifact should be readable");
+        let second_bytes = fs::read(&second).expect("second artifact should be readable");
+        fs::remove_file(first).ok();
+        fs::remove_file(second).ok();
+        fs::remove_dir(directory).ok();
+
+        assert_eq!(first_bytes, second_bytes);
     }
 }

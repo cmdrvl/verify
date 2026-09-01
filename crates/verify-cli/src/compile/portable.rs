@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use verify_core::{
     constraint::{
@@ -12,6 +12,10 @@ use verify_core::{
         PredicateExpression, Rule, Severity,
     },
     refusal::RefusalCode,
+    validation::{
+        ConstraintValidationError, ConstraintValidationReason, analyze_predicate,
+        validate_predicate_key_fields,
+    },
 };
 
 #[cfg(test)]
@@ -93,12 +97,16 @@ impl PortableAuthoring {
             ));
         }
 
+        for (name, binding) in &self.bindings {
+            binding.validate(name)?;
+        }
+
         let binding_names = self.bindings.keys().cloned().collect::<BTreeSet<_>>();
-        let bindings = self
+        let key_fields_by_binding = self
             .bindings
-            .into_iter()
-            .map(|(name, binding)| binding.compile(name))
-            .collect::<Result<Vec<_>, _>>()?;
+            .iter()
+            .map(|(name, binding)| (name.clone(), binding.key_fields.clone()))
+            .collect::<BTreeMap<_, _>>();
 
         let mut seen_rule_ids = BTreeSet::new();
         let mut rules = Vec::with_capacity(self.rules.len());
@@ -109,8 +117,28 @@ impl PortableAuthoring {
                     json!({"rule_id": rule.id}),
                 ));
             }
-            rules.push(rule.compile(&binding_names)?);
+            rules.push(rule.compile(&binding_names, &key_fields_by_binding)?);
         }
+
+        if let Some((binding, _)) = key_fields_by_binding
+            .iter()
+            .find(|(_, key_fields)| key_fields.as_ref().is_some_and(Vec::is_empty))
+        {
+            return Err(bad_authoring(
+                "binding key_fields must not be explicitly empty",
+                json!({
+                    "reason": ConstraintValidationReason::EmptyKeyFields,
+                    "binding": binding,
+                    "key_fields": [],
+                }),
+            ));
+        }
+
+        let bindings = self
+            .bindings
+            .into_iter()
+            .map(|(name, binding)| binding.compile(name))
+            .collect();
 
         Ok(ConstraintSet {
             version: verify_core::CONSTRAINT_VERSION.to_owned(),
@@ -124,21 +152,36 @@ impl PortableAuthoring {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct PortableBindingAuthoring {
-    #[serde(default)]
-    key_fields: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_key_fields")]
+    key_fields: Option<Vec<String>>,
 }
 
 impl PortableBindingAuthoring {
-    fn compile(self, name: String) -> Result<Binding, CompileError> {
-        require_non_empty("binding name", &name)?;
-        ensure_optional_named_list("key_fields", &self.key_fields)?;
+    fn validate(&self, name: &str) -> Result<(), CompileError> {
+        require_non_empty("binding name", name)?;
+        if let Some(key_fields) = &self.key_fields
+            && !key_fields.is_empty()
+        {
+            ensure_named_list("key_fields", key_fields)?;
+        }
 
-        Ok(Binding {
+        Ok(())
+    }
+
+    fn compile(self, name: String) -> Binding {
+        Binding {
             name,
             kind: BindingKind::Relation,
-            key_fields: self.key_fields,
-        })
+            key_fields: self.key_fields.unwrap_or_default(),
+        }
     }
+}
+
+fn deserialize_optional_key_fields<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,20 +212,12 @@ struct PortableRuleAuthoring {
 }
 
 impl PortableRuleAuthoring {
-    fn compile(self, binding_names: &BTreeSet<String>) -> Result<Rule, CompileError> {
+    fn compile(
+        self,
+        binding_names: &BTreeSet<String>,
+        key_fields_by_binding: &BTreeMap<String, Option<Vec<String>>>,
+    ) -> Result<Rule, CompileError> {
         require_non_empty("rule id", &self.id)?;
-
-        if let Some(portability) = self.portability
-            && portability != Portability::Portable
-        {
-            return Err(bad_authoring(
-                "portable authoring cannot emit batch-only rules",
-                json!({
-                    "rule_id": self.id,
-                    "portability": portability,
-                }),
-            ));
-        }
 
         let check = match self.op.as_str() {
             "unique" => Check::Unique {
@@ -194,7 +229,7 @@ impl PortableRuleAuthoring {
                 columns: self.require_columns()?,
             },
             "predicate" => Check::Predicate {
-                binding: self.require_binding(binding_names)?,
+                binding: self.require_predicate_binding()?,
                 expr: self.require_expr()?,
             },
             "row_count" => Check::RowCount {
@@ -233,12 +268,81 @@ impl PortableRuleAuthoring {
             }
         };
 
+        let analysis = match &check {
+            Check::Predicate { binding, expr } => Some(analyze_predicate(binding, expr)),
+            _ => None,
+        };
+        let derived_portability = analysis.as_ref().map_or(Portability::Portable, |analysis| {
+            analysis.derived_portability
+        });
+        let participating_bindings = analysis.as_ref().map_or_else(
+            || check_binding_names(&check),
+            |analysis| analysis.participating_bindings.clone(),
+        );
+
+        if let Some(declared_portability) = self.portability
+            && declared_portability != derived_portability
+        {
+            return Err(bad_authoring(
+                "declared rule portability does not match its derived semantics",
+                json!({
+                    "reason": ConstraintValidationReason::PortabilityMismatch,
+                    "rule_id": self.id,
+                    "declared_portability": declared_portability,
+                    "derived_portability": derived_portability,
+                    "participating_bindings": participating_bindings,
+                }),
+            ));
+        }
+
+        if let Some(analysis) = &analysis {
+            if let Some(binding) = analysis
+                .participating_bindings
+                .iter()
+                .find(|binding| !binding_names.contains(binding.as_str()))
+            {
+                return Err(bad_authoring(
+                    "predicate expression references an undeclared binding",
+                    json!({
+                        "reason": ConstraintValidationReason::UndeclaredReference,
+                        "rule_id": self.id,
+                        "binding": binding,
+                        "participating_bindings": analysis.participating_bindings,
+                    }),
+                ));
+            }
+
+            if derived_portability == Portability::BatchOnly {
+                validate_predicate_key_fields(
+                    &self.id,
+                    &analysis.anchor_binding,
+                    &analysis.participating_bindings,
+                    key_fields_by_binding,
+                )
+                .map_err(validation_bad_authoring)?;
+            }
+        }
+
         Ok(Rule {
             id: self.id,
             severity: self.severity,
-            portability: Portability::Portable,
+            portability: derived_portability,
             check,
         })
+    }
+
+    fn require_predicate_binding(&self) -> Result<String, CompileError> {
+        let binding = self.binding.clone().ok_or_else(|| {
+            bad_authoring(
+                "portable rule is missing the required binding field",
+                json!({
+                    "rule_id": self.id,
+                    "op": self.op,
+                }),
+            )
+        })?;
+        require_non_empty("binding", &binding)?;
+        Ok(binding)
     }
 
     fn require_binding(&self, binding_names: &BTreeSet<String>) -> Result<String, CompileError> {
@@ -289,12 +393,6 @@ impl PortableRuleAuthoring {
             )
         })?;
         let normalized = normalize_predicate_aliases(expr);
-        if contains_explicit_column_binding(&normalized) {
-            return Err(bad_authoring(
-                "predicate expression is invalid: binding-qualified references require compiler support",
-                json!({"rule_id": self.id}),
-            ));
-        }
 
         serde_json::from_value(normalized).map_err(|error| {
             bad_authoring(
@@ -327,14 +425,32 @@ impl PortableRuleAuthoring {
     }
 }
 
-fn contains_explicit_column_binding(value: &Value) -> bool {
-    match value {
-        Value::Object(fields) => {
-            fields.contains_key("binding") || fields.values().any(contains_explicit_column_binding)
-        }
-        Value::Array(values) => values.iter().any(contains_explicit_column_binding),
-        _ => false,
-    }
+fn check_binding_names(check: &Check) -> Vec<String> {
+    let names = match check {
+        Check::Unique { binding, .. }
+        | Check::NotNull { binding, .. }
+        | Check::Predicate { binding, .. }
+        | Check::RowCount { binding, .. }
+        | Check::AggregateCompare { binding, .. } => vec![binding.clone()],
+        Check::ForeignKey {
+            binding,
+            ref_binding,
+            ..
+        } => vec![binding.clone(), ref_binding.clone()],
+        Check::QueryZeroRows { bindings, .. } => bindings.clone(),
+    };
+    names
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validation_bad_authoring(error: ConstraintValidationError) -> CompileError {
+    bad_authoring(
+        &format!("predicate authoring is invalid: {}", error.reason.as_str()),
+        error.detail,
+    )
 }
 
 fn normalize_predicate_aliases(value: Value) -> Value {
@@ -459,14 +575,6 @@ fn ensure_named_list(field: &str, values: &[String]) -> Result<(), CompileError>
     Ok(())
 }
 
-fn ensure_optional_named_list(field: &str, values: &[String]) -> Result<(), CompileError> {
-    if values.is_empty() {
-        return Ok(());
-    }
-
-    ensure_named_list(field, values)
-}
-
 fn require_non_empty(field: &str, value: &str) -> Result<(), CompileError> {
     if value.trim().is_empty() {
         return Err(bad_authoring(
@@ -494,10 +602,18 @@ fn refusal_code(code: RefusalCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use verify_core::constraint::{Check, ConstraintSet};
+    use serde_json::{Value, json};
+    use verify_core::constraint::{Check, ConstraintSet, Portability};
 
     use super::{CompileError, compile_source, scaffold_surface};
+
+    fn bad_authoring_detail(source: &str, expectation: &str) -> Result<Value, String> {
+        match compile_source(source) {
+            Err(CompileError::BadAuthoring { detail, .. }) => Ok(detail),
+            Err(error) => Err(format!("{expectation}; received {error:?}")),
+            Ok(_) => Err(format!("{expectation}; compilation succeeded")),
+        }
+    }
 
     #[test]
     fn scaffold_surface_tracks_check_mode() {
@@ -521,6 +637,63 @@ mod tests {
             serde_json::from_str(EXPECTED).expect("compiled fixture parses");
 
         assert_eq!(compiled, expected);
+    }
+
+    #[test]
+    fn compiles_binding_qualified_yaml_and_json_with_inferred_portability() {
+        const AUTHORING: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/authoring/binding_qualified/maturity_date_immutable.yaml"
+        ));
+        const EXPECTED: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/constraints/binding_qualified/maturity_date_immutable.verify.json"
+        ));
+
+        let yaml_compiled = compile_source(AUTHORING).expect("YAML fixture should compile");
+        let expected: ConstraintSet =
+            serde_json::from_str(EXPECTED).expect("compiled fixture should parse");
+        assert_eq!(yaml_compiled, expected);
+        assert_eq!(yaml_compiled.rules[0].portability, Portability::BatchOnly);
+
+        let json_compiled = compile_source(
+            r#"{
+                "constraint_set_id": "fixtures.binding_qualified.maturity_date_immutable",
+                "bindings": {
+                    "current": {"key_fields": ["loan_id", "tranche_id"]},
+                    "prior": {"key_fields": ["asset_number", "class_code"]}
+                },
+                "rules": [{
+                    "id": "MATURITY_DATE_IMMUTABLE",
+                    "severity": "error",
+                    "portability": "batch_only",
+                    "binding": "current",
+                    "op": "predicate",
+                    "expr": {"eq": [
+                        {"column": "maturity_date"},
+                        {"binding": "prior", "column": "maturity_date"}
+                    ]}
+                }]
+            }"#,
+        )
+        .expect("JSON authoring should compile");
+        assert_eq!(json_compiled, expected);
+    }
+
+    #[test]
+    fn binding_qualified_compilation_is_byte_deterministic() {
+        const AUTHORING: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/authoring/binding_qualified/maturity_date_immutable.yaml"
+        ));
+
+        let first = compile_source(AUTHORING).expect("first compilation should succeed");
+        let second = compile_source(AUTHORING).expect("second compilation should succeed");
+
+        assert_eq!(
+            serde_json::to_vec(&first).expect("first artifact should serialize"),
+            serde_json::to_vec(&second).expect("second artifact should serialize")
+        );
     }
 
     #[test]
@@ -639,30 +812,170 @@ rules:
     }
 
     #[test]
-    fn rejects_binding_qualified_column_references_before_feature_support() {
-        let error = compile_source(
+    fn explicit_anchor_reference_remains_portable_and_is_preserved() -> Result<(), String> {
+        let compiled = compile_source(
             r#"
-constraint_set_id: invalid.cross_binding_predicate
+constraint_set_id: explicit.anchor.predicate
 bindings:
-  old: { key_fields: [id] }
-  new: { key_fields: [id] }
+  input: {}
 rules:
-  - id: VALUE_IMMUTABLE
+  - id: VALUE_MATCHES_EXPECTED
     severity: error
-    binding: new
+    portability: portable
+    binding: input
     op: predicate
     expr:
       eq:
-        - { binding: old, column: value }
-        - { binding: new, column: value }
+        - { binding: input, column: value }
+        - { column: expected }
 "#,
         )
-        .expect_err("unknown column-reference fields must not compile");
+        .expect("same-anchor reference should compile");
 
-        assert!(matches!(error, CompileError::BadAuthoring { .. }));
-        let CompileError::BadAuthoring { message, .. } = error else {
-            return;
+        assert_eq!(compiled.rules[0].portability, Portability::Portable);
+        let Check::Predicate { expr, .. } = &compiled.rules[0].check else {
+            return Err("compiled rule should remain a predicate".to_owned());
         };
-        assert!(message.contains("predicate expression is invalid"));
+        assert_eq!(
+            serde_json::to_value(expr).expect("expression should serialize")["eq"][0]["binding"],
+            "input"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_both_declared_portability_mismatches() -> Result<(), String> {
+        let cross_declared_portable = r#"
+constraint_set_id: invalid.cross_portability
+bindings:
+  current: { key_fields: [id] }
+  prior: { key_fields: [id] }
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    portability: portable
+    binding: current
+    op: predicate
+    expr:
+      eq:
+        - { column: value }
+        - { binding: prior, column: value }
+"#;
+        let anchor_declared_batch = r#"
+constraint_set_id: invalid.anchor_portability
+bindings:
+  input: {}
+rules:
+  - id: VALUE_PRESENT
+    severity: error
+    portability: batch_only
+    binding: input
+    op: predicate
+    expr: { column: value }
+"#;
+
+        for source in [cross_declared_portable, anchor_declared_batch] {
+            let detail = bad_authoring_detail(source, "portability mismatch should refuse")?;
+            assert_eq!(detail["reason"], "portability_mismatch");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_nested_undeclared_binding_reference() -> Result<(), String> {
+        let detail = bad_authoring_detail(
+            r#"
+constraint_set_id: invalid.nested_binding
+bindings:
+  current: { key_fields: [id] }
+rules:
+  - id: VALUE_PRESENT
+    severity: error
+    portability: batch_only
+    binding: current
+    op: predicate
+    expr:
+      or:
+        - { is_null: { column: value } }
+        - { not: { is_blank: { binding: missing, column: value } } }
+"#,
+            "nested undeclared reference should refuse",
+        )?;
+        assert_eq!(detail["reason"], "undeclared_reference");
+        assert_eq!(detail["binding"], "missing");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_every_binding_qualified_key_shape_defect() -> Result<(), String> {
+        let missing = r#"
+constraint_set_id: invalid.missing_keys
+bindings:
+  current: { key_fields: [id] }
+  prior: {}
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    binding: current
+    op: predicate
+    expr: { eq: [{ column: value }, { binding: prior, column: value }] }
+"#;
+        let empty = r#"
+constraint_set_id: invalid.empty_keys
+bindings:
+  current: { key_fields: [id] }
+  prior: { key_fields: [] }
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    binding: current
+    op: predicate
+    expr: { eq: [{ column: value }, { binding: prior, column: value }] }
+"#;
+        let arity = r#"
+constraint_set_id: invalid.key_arity
+bindings:
+  current: { key_fields: [id, part] }
+  prior: { key_fields: [id] }
+rules:
+  - id: VALUE_IMMUTABLE
+    severity: error
+    binding: current
+    op: predicate
+    expr: { eq: [{ column: value }, { binding: prior, column: value }] }
+"#;
+
+        for (source, reason) in [
+            (missing, "missing_key_fields"),
+            (empty, "empty_key_fields"),
+            (arity, "key_arity_mismatch"),
+        ] {
+            let detail = bad_authoring_detail(source, "invalid key shape should refuse")?;
+            assert_eq!(detail["reason"], reason);
+            assert_eq!(detail["rule_id"], "VALUE_IMMUTABLE");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_empty_key_fields_are_rejected_even_without_a_cross_binding_rule()
+    -> Result<(), String> {
+        let detail = bad_authoring_detail(
+            r#"
+constraint_set_id: invalid.unused_empty_keys
+bindings:
+  input: { key_fields: [] }
+rules:
+  - id: VALUE_PRESENT
+    severity: error
+    binding: input
+    op: not_null
+    columns: [value]
+"#,
+            "explicit empty key fields must not normalize to omission",
+        )?;
+        assert_eq!(detail["reason"], "empty_key_fields");
+        assert_eq!(detail["binding"], "input");
+        Ok(())
     }
 }

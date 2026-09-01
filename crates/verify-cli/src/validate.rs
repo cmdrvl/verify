@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::Args;
 use serde_json::json;
 use verify_core::constraint::{Check, ConstraintSet};
+use verify_core::validation::validate_constraint_predicates;
 
 #[derive(Debug, Clone, Args)]
 pub struct ValidateArgs {
@@ -44,6 +45,13 @@ pub fn execute(args: ValidateArgs) -> Result<(), String> {
     for rule in &constraints.rules {
         check_rule_bindings(&rule.id, &rule.check, &binding_names)?;
     }
+    validate_constraint_predicates(&constraints).map_err(|error| {
+        format!(
+            "invalid compiled constraints {}: {error}\ndetail: {}",
+            args.compiled_constraints.display(),
+            error.detail
+        )
+    })?;
 
     if args.json {
         println!(
@@ -158,6 +166,20 @@ mod tests {
     }
 
     #[test]
+    fn validates_good_binding_qualified_fixture() {
+        let result = execute(ValidateArgs {
+            compiled_constraints: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/constraints/binding_qualified/maturity_date_immutable.verify.json"
+            )
+            .into(),
+            json: false,
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn rejects_missing_file() {
         let error = execute(ValidateArgs {
             compiled_constraints: "nonexistent.verify.json".into(),
@@ -216,5 +238,130 @@ mod tests {
 
         let error = result.expect_err("unknown fields must be rejected");
         assert!(error.contains("invalid compiled constraints"));
+    }
+
+    #[test]
+    fn rejects_binding_qualified_structural_defects_with_stable_reasons() {
+        let cases = [
+            (
+                "portability",
+                r#"{
+                    "version": "verify.constraint.v1",
+                    "constraint_set_id": "invalid.portability",
+                    "bindings": [
+                        {"name": "current", "kind": "relation", "key_fields": ["id"]},
+                        {"name": "prior", "kind": "relation", "key_fields": ["id"]}
+                    ],
+                    "rules": [{
+                        "id": "VALUE_IMMUTABLE",
+                        "severity": "error",
+                        "portability": "portable",
+                        "check": {"op": "predicate", "binding": "current", "expr": {
+                            "eq": [{"column": "value"}, {"binding": "prior", "column": "value"}]
+                        }}
+                    }]
+                }"#,
+                "portability_mismatch",
+            ),
+            (
+                "undeclared",
+                r#"{
+                    "version": "verify.constraint.v1",
+                    "constraint_set_id": "invalid.undeclared",
+                    "bindings": [
+                        {"name": "current", "kind": "relation", "key_fields": ["id"]}
+                    ],
+                    "rules": [{
+                        "id": "VALUE_IMMUTABLE",
+                        "severity": "error",
+                        "portability": "batch_only",
+                        "check": {"op": "predicate", "binding": "current", "expr": {
+                            "eq": [{"column": "value"}, {"binding": "prior", "column": "value"}]
+                        }}
+                    }]
+                }"#,
+                "undeclared_reference",
+            ),
+            (
+                "missing_keys",
+                r#"{
+                    "version": "verify.constraint.v1",
+                    "constraint_set_id": "invalid.missing_keys",
+                    "bindings": [
+                        {"name": "current", "kind": "relation", "key_fields": ["id"]},
+                        {"name": "prior", "kind": "relation"}
+                    ],
+                    "rules": [{
+                        "id": "VALUE_IMMUTABLE",
+                        "severity": "error",
+                        "portability": "batch_only",
+                        "check": {"op": "predicate", "binding": "current", "expr": {
+                            "eq": [{"column": "value"}, {"binding": "prior", "column": "value"}]
+                        }}
+                    }]
+                }"#,
+                "missing_key_fields",
+            ),
+            (
+                "empty_keys",
+                r#"{
+                    "version": "verify.constraint.v1",
+                    "constraint_set_id": "invalid.empty_keys",
+                    "bindings": [
+                        {"name": "current", "kind": "relation", "key_fields": ["id"]},
+                        {"name": "prior", "kind": "relation", "key_fields": []}
+                    ],
+                    "rules": [{
+                        "id": "VALUE_IMMUTABLE",
+                        "severity": "error",
+                        "portability": "batch_only",
+                        "check": {"op": "predicate", "binding": "current", "expr": {
+                            "eq": [{"column": "value"}, {"binding": "prior", "column": "value"}]
+                        }}
+                    }]
+                }"#,
+                "empty_key_fields",
+            ),
+            (
+                "key_arity",
+                r#"{
+                    "version": "verify.constraint.v1",
+                    "constraint_set_id": "invalid.key_arity",
+                    "bindings": [
+                        {"name": "current", "kind": "relation", "key_fields": ["id", "part"]},
+                        {"name": "prior", "kind": "relation", "key_fields": ["id"]}
+                    ],
+                    "rules": [{
+                        "id": "VALUE_IMMUTABLE",
+                        "severity": "error",
+                        "portability": "batch_only",
+                        "check": {"op": "predicate", "binding": "current", "expr": {
+                            "eq": [{"column": "value"}, {"binding": "prior", "column": "value"}]
+                        }}
+                    }]
+                }"#,
+                "key_arity_mismatch",
+            ),
+        ];
+
+        for (stem, source, reason) in cases {
+            let directory = reserve_temp_directory(&format!("verify-validate-{stem}"))
+                .expect("temporary directory should be reserved");
+            let path = directory.join("constraints.verify.json");
+            fs::write(&path, source).expect("temporary constraints should be written");
+
+            let result = execute(ValidateArgs {
+                compiled_constraints: path.clone(),
+                json: false,
+            });
+            fs::remove_file(path).ok();
+            fs::remove_dir(directory).ok();
+
+            let error = result.expect_err("malformed compiled predicate should be rejected");
+            assert!(
+                error.contains(reason),
+                "expected reason {reason} in validation error: {error}"
+            );
+        }
     }
 }
