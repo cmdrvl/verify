@@ -10,7 +10,13 @@ use verify_core::{
     validation::analyze_predicate,
 };
 
-use crate::Relation;
+use crate::{
+    Relation,
+    scalar::{
+        compare_values as compare_scalar_values, is_blank, value_type,
+        values_equal as scalar_values_equal,
+    },
+};
 
 pub const PORTABLE_ROW_OPS: &[&str] = &["unique", "not_null", "predicate"];
 
@@ -399,17 +405,8 @@ fn values_equal(
     context: ExpressionContext<'_>,
     field: Option<&str>,
 ) -> Result<bool, EngineError> {
-    match (left, right) {
-        (Value::Number(l), Value::Number(r)) => match (l.as_f64(), r.as_f64()) {
-            (Some(lf), Some(rf)) => Ok(lf == rf),
-            _ => Err(incomparable_error(operator, left, right, context, field)),
-        },
-        (Value::String(left), Value::String(right)) => Ok(left == right),
-        (Value::Bool(left), Value::Bool(right)) => Ok(left == right),
-        (Value::Null, Value::Null) => Ok(true),
-        (Value::Null, _) | (_, Value::Null) => Ok(false),
-        _ => Err(incomparable_error(operator, left, right, context, field)),
-    }
+    scalar_values_equal(left, right)
+        .map_err(|_| incomparable_error(operator, left, right, context, field))
 }
 
 fn compare_values(
@@ -418,17 +415,9 @@ fn compare_values(
     right: &Value,
     context: ExpressionContext<'_>,
     field: Option<&str>,
-) -> Result<Ordering, EngineError> {
-    match (left, right) {
-        (Value::Number(left_number), Value::Number(right_number)) => left_number
-            .as_f64()
-            .zip(right_number.as_f64())
-            .map(|(left, right)| left.total_cmp(&right))
-            .ok_or_else(|| incomparable_error(operator, left, right, context, field)),
-        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
-        (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
-        _ => Err(incomparable_error(operator, left, right, context, field)),
-    }
+) -> Result<std::cmp::Ordering, EngineError> {
+    compare_scalar_values(left, right)
+        .map_err(|_| incomparable_error(operator, left, right, context, field))
 }
 
 fn incomparable_error(
@@ -448,17 +437,6 @@ fn incomparable_error(
     }))
 }
 
-fn value_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
 fn binary_field(operands: &[PredicateOperand; 2]) -> Option<String> {
     operands.iter().find_map(|operand| match operand {
         PredicateOperand::Column(column) => Some(column.column.clone()),
@@ -476,15 +454,6 @@ fn membership_field(operand: &MembershipOperand) -> Option<String> {
 }
 
 // --- Helpers ---
-
-/// V0 missingness: null, empty string, and whitespace-only string are all "blank".
-fn is_blank(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::String(s) => s.is_empty() || s.chars().all(char::is_whitespace),
-        _ => false,
-    }
-}
 
 fn extract_key(
     row: &BTreeMap<String, Value>,

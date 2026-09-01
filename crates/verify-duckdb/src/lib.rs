@@ -1,18 +1,27 @@
 #![forbid(unsafe_code)]
 
+pub mod binding_predicates;
 pub mod bindings;
 pub mod lock_check;
 pub mod query_rules;
+pub mod scalar;
 
 use duckdb::Connection;
 use verify_core::constraint::ConstraintSet;
 
+pub use binding_predicates::{
+    BINDING_PREDICATE_OP, BindingPredicateError, BindingPredicateExecutor,
+    evaluate_rule as evaluate_binding_predicate,
+};
 pub use bindings::{
     BatchBindingError, BatchBindingInput, BatchBindingLimits, BindingColumn, BindingFormat,
     BindingMetadata, BindingRegistry, LoadedBinding, SUPPORTED_EXTENSIONS,
 };
 pub use lock_check::{LockError, verify_locks};
 pub use query_rules::{QueryRuleError, evaluate_query_rule, execute_query_rules};
+pub use scalar::{
+    DuckValueError, DuckValueErrorKind, duckdb_type_category, duckdb_value_to_protocol,
+};
 
 pub struct BatchContext {
     connection: Connection,

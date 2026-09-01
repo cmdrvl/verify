@@ -3,6 +3,7 @@
 pub mod embedded;
 pub mod portable_relation;
 pub mod portable_row;
+pub mod scalar;
 pub mod summary;
 
 use std::collections::BTreeMap;

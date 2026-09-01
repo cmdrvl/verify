@@ -135,6 +135,10 @@ impl LoadedBinding {
         &self.columns
     }
 
+    pub fn column(&self, name: &str) -> Option<&BindingColumn> {
+        self.columns.iter().find(|column| column.name == name)
+    }
+
     pub fn metadata(&self) -> &BindingMetadata {
         &self.metadata
     }
@@ -170,6 +174,42 @@ impl BindingRegistry {
             .iter()
             .map(|(name, binding)| (name.clone(), binding.binding_report()))
             .collect()
+    }
+
+    pub fn declarations(&self) -> Vec<Binding> {
+        self.bindings
+            .values()
+            .map(|binding| binding.declared.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_relations_for_test(
+        connection: &Connection,
+        declarations: Vec<Binding>,
+    ) -> duckdb::Result<Self> {
+        let mut bindings = BTreeMap::new();
+        for declared in declarations {
+            let relation_name = declared.name.clone();
+            let columns = describe_relation(connection, &relation_name)?;
+            let row_count = count_rows(connection, &relation_name)?;
+            let source_path = PathBuf::from(format!("<test:{relation_name}>"));
+            let loaded = LoadedBinding {
+                declared,
+                source_path,
+                format: BindingFormat::Csv,
+                relation_name: relation_name.clone(),
+                columns,
+                metadata: BindingMetadata {
+                    source: format!("memory:{relation_name}"),
+                    content_hash: format!("sha256:test-{relation_name}"),
+                    byte_len: 0,
+                    row_count,
+                },
+            };
+            bindings.insert(relation_name, loaded);
+        }
+        Ok(Self { bindings })
     }
 }
 
@@ -565,7 +605,7 @@ fn is_nested_type(data_type: &str) -> bool {
         || normalized.contains("[]")
 }
 
-fn quote_identifier(identifier: &str) -> String {
+pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
@@ -643,6 +683,7 @@ mod tests {
         let path = dir.path().join(name);
         let connection = Connection::open_in_memory()?;
         let escaped_path = sql_string_literal(&path);
+        // ubs:ignore — test-only temp path is escaped by sql_string_literal before interpolation.
         connection.execute_batch(&format!(
             "COPY (
                 SELECT 'LN-001' AS loan_id, 100.0 AS balance
