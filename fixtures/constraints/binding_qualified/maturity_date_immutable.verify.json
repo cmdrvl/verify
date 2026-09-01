@@ -1,0 +1,44 @@
+{
+  "version": "verify.constraint.v1",
+  "constraint_set_id": "fixtures.binding_qualified.maturity_date_immutable",
+  "bindings": [
+    {
+      "name": "current",
+      "kind": "relation",
+      "key_fields": [
+        "loan_id",
+        "tranche_id"
+      ]
+    },
+    {
+      "name": "prior",
+      "kind": "relation",
+      "key_fields": [
+        "asset_number",
+        "class_code"
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "MATURITY_DATE_IMMUTABLE",
+      "severity": "error",
+      "portability": "batch_only",
+      "check": {
+        "op": "predicate",
+        "binding": "current",
+        "expr": {
+          "eq": [
+            {
+              "column": "maturity_date"
+            },
+            {
+              "binding": "prior",
+              "column": "maturity_date"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

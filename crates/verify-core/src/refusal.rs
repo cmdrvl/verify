@@ -21,6 +21,12 @@ pub enum RefusalCode {
     FieldNotFound,
     #[serde(rename = "E_BAD_EXPR")]
     BadExpr,
+    #[serde(rename = "E_KEY_INVALID")]
+    KeyInvalid,
+    #[serde(rename = "E_KEY_AMBIGUOUS")]
+    KeyAmbiguous,
+    #[serde(rename = "E_KEY_UNMATCHED")]
+    KeyUnmatched,
     #[serde(rename = "E_SQL_ERROR")]
     SqlError,
     #[serde(rename = "E_BATCH_ONLY_RULE")]
@@ -49,6 +55,9 @@ impl RefusalCode {
                 "Fix the constraint set or bind an input that exposes the required field."
             }
             Self::BadExpr => "Fix the rule expression.",
+            Self::KeyInvalid => "Fix the key data or correct the binding's `key_fields`.",
+            Self::KeyAmbiguous => "Deduplicate the keyed relation or correct `key_fields`.",
+            Self::KeyUnmatched => "Supply the counterpart row or correct key alignment.",
             Self::SqlError => "Fix the query-backed rule.",
             Self::BatchOnlyRule => "Lower the rule or run in batch mode.",
             Self::KeyConflict => "Remove the CLI override or fix the authored binding key.",
@@ -107,5 +116,32 @@ mod tests {
             refusal.next_step,
             "Remove the CLI override or fix the authored binding key."
         );
+    }
+
+    #[test]
+    fn key_refusals_serialize_with_actionable_guidance() {
+        for (code, serialized, guidance) in [
+            (
+                RefusalCode::KeyInvalid,
+                "\"E_KEY_INVALID\"",
+                "Fix the key data or correct the binding's `key_fields`.",
+            ),
+            (
+                RefusalCode::KeyAmbiguous,
+                "\"E_KEY_AMBIGUOUS\"",
+                "Deduplicate the keyed relation or correct `key_fields`.",
+            ),
+            (
+                RefusalCode::KeyUnmatched,
+                "\"E_KEY_UNMATCHED\"",
+                "Supply the counterpart row or correct key alignment.",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&code).expect("code serializes"),
+                serialized
+            );
+            assert_eq!(code.next_step(), guidance);
+        }
     }
 }

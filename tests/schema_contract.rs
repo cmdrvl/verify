@@ -5,8 +5,9 @@
 use std::fs;
 
 use serde_json::Value;
-use verify_core::constraint::ConstraintSet;
+use verify_core::constraint::{Check, ConstraintSet, Portability};
 use verify_core::report::VerifyReport;
+use verify_core::validation::validate_constraint_predicates;
 
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
@@ -58,6 +59,44 @@ fn query_rules_fixture_parses_as_constraint_set() {
     assert_eq!(constraints.rules.len(), 1);
 }
 
+#[test]
+fn binding_qualified_fixture_round_trips_and_validates() {
+    let path =
+        fixture("fixtures/constraints/binding_qualified/maturity_date_immutable.verify.json");
+    let bytes = fs::read(&path).expect("fixture should exist");
+    let expected: Value = serde_json::from_slice(&bytes).expect("fixture should be valid JSON");
+    let constraints: ConstraintSet =
+        serde_json::from_slice(&bytes).expect("fixture should parse as ConstraintSet");
+
+    assert_eq!(
+        constraints.bindings[0].key_fields,
+        ["loan_id", "tranche_id"]
+    );
+    assert_eq!(
+        constraints.bindings[1].key_fields,
+        ["asset_number", "class_code"]
+    );
+    assert_eq!(constraints.rules[0].portability, Portability::BatchOnly);
+    let expr = constraints
+        .rules
+        .first()
+        .and_then(|rule| match &rule.check {
+            Check::Predicate { expr, .. } => Some(expr),
+            _ => None,
+        })
+        .expect("fixture should contain a predicate rule");
+    assert!(
+        serde_json::to_value(expr).expect("expression should serialize")["eq"][1]["binding"]
+            == "prior"
+    );
+    validate_constraint_predicates(&constraints)
+        .expect("fixture predicate declarations should validate");
+    assert_eq!(
+        serde_json::to_value(constraints).expect("fixture should serialize"),
+        expected
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Report fixture round-trips
 // ---------------------------------------------------------------------------
@@ -107,6 +146,7 @@ fn all_constraint_fixtures_are_valid_json() {
         "constraints/arity1",
         "constraints/arity_n",
         "constraints/query_rules",
+        "constraints/binding_qualified",
     ] {
         let dir = fixture(&format!("fixtures/{family}"));
         for entry in fs::read_dir(&dir).expect("fixture dir should exist") {
@@ -114,9 +154,13 @@ fn all_constraint_fixtures_are_valid_json() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 let bytes = fs::read(&path).expect("fixture should be readable");
-                let _: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                    panic!("fixture {} should be valid JSON: {error}", path.display())
-                });
+                let parsed = serde_json::from_slice::<Value>(&bytes);
+                assert!(
+                    parsed.is_ok(),
+                    "fixture {} should be valid JSON: {:?}",
+                    path.display(),
+                    parsed.err()
+                );
             }
         }
     }
@@ -140,6 +184,40 @@ fn report_schema_is_valid_json() {
     let bytes = fs::read(&schema_path).expect("schema should exist");
     let schema: Value = serde_json::from_slice(&bytes).expect("schema should be valid JSON");
     assert_eq!(schema["title"], "verify.report.v1");
+}
+
+#[test]
+fn constraint_schema_admits_qualified_columns_and_rejects_empty_key_arrays() {
+    let path = fixture("schemas/verify.constraint.v1.schema.json");
+    let bytes = fs::read(path).expect("schema should exist");
+    let schema: Value = serde_json::from_slice(&bytes).expect("schema should be valid JSON");
+
+    assert_eq!(
+        schema["$defs"]["column_ref"]["properties"]["binding"]["type"],
+        "string"
+    );
+    assert_eq!(
+        schema["$defs"]["column_ref"]["properties"]["binding"]["minLength"],
+        1
+    );
+    assert_eq!(
+        schema["$defs"]["binding"]["properties"]["key_fields"]["minItems"],
+        1
+    );
+}
+
+#[test]
+fn report_schema_lists_binding_key_refusal_codes() {
+    let path = fixture("schemas/verify.report.v1.schema.json");
+    let bytes = fs::read(path).expect("schema should exist");
+    let schema: Value = serde_json::from_slice(&bytes).expect("schema should be valid JSON");
+    let codes = schema["$defs"]["refusal_code"]["enum"]
+        .as_array()
+        .expect("refusal codes should be an array");
+
+    for code in ["E_KEY_INVALID", "E_KEY_AMBIGUOUS", "E_KEY_UNMATCHED"] {
+        assert!(codes.iter().any(|candidate| candidate == code));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -200,7 +200,7 @@ mod tests {
                     "check": {
                         "op": "predicate",
                         "binding": "input",
-                        "expr": {"column": "value", "binding": "other"}
+                        "expr": {"column": "value", "unexpected": "other"}
                     }
                 }]
             }"#,

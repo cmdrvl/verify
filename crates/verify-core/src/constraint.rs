@@ -34,8 +34,25 @@ impl Default for ConstraintSet {
 pub struct Binding {
     pub name: String,
     pub kind: BindingKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_key_fields"
+    )]
     pub key_fields: Vec<String>,
+}
+
+fn deserialize_key_fields<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let key_fields = Vec::<String>::deserialize(deserializer)?;
+    if key_fields.is_empty() {
+        return Err(D::Error::custom(
+            "empty_key_fields: key_fields must contain at least one field when present",
+        ));
+    }
+    Ok(key_fields)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -139,7 +156,26 @@ pub enum PredicateExpression {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnReference {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_empty_string"
+    )]
+    pub binding: Option<String>,
     pub column: String,
+}
+
+fn deserialize_optional_non_empty_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(D::Error::custom("binding must be a non-empty string"));
+    }
+    Ok(Some(value))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -479,7 +515,7 @@ mod tests {
         cases.push(("predicate expression", expression));
 
         let mut column = minimal_predicate_artifact();
-        column["rules"][0]["check"]["expr"]["binding"] = json!("other");
+        column["rules"][0]["check"]["expr"]["unexpected"] = json!("other");
         cases.push(("column reference", column));
 
         for (boundary, artifact) in cases {
@@ -496,7 +532,7 @@ mod tests {
     #[test]
     fn predicate_objects_cannot_fall_back_to_literals() {
         for invalid in [
-            json!({ "eq": [{ "column": "value" }, { "binding": "old", "column": "value" }] }),
+            json!({ "eq": [{ "column": "value" }, { "column": "value", "unexpected": true }] }),
             json!({ "eq": [{ "column": "value" }, [1, 2]] }),
             json!({ "in": [{ "column": "value" }, [1, { "nested": true }]] }),
         ] {
@@ -517,5 +553,57 @@ mod tests {
             "in": [{ "column": "value" }, [null, true, 1, "one"]]
         }))
         .expect("scalar membership set should parse");
+    }
+
+    #[test]
+    fn optional_column_binding_round_trips_without_changing_legacy_shape() {
+        let legacy_bytes = r#"{"eq":[{"column":"value"},1]}"#;
+        let legacy: PredicateExpression =
+            serde_json::from_str(legacy_bytes).expect("legacy predicate should parse");
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("legacy predicate should serialize"),
+            json!({ "eq": [{ "column": "value" }, 1] })
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("legacy predicate bytes should serialize"),
+            legacy_bytes
+        );
+
+        let qualified = json!({
+            "eq": [
+                { "column": "value" },
+                { "binding": "prior", "column": "value" }
+            ]
+        });
+        let parsed: PredicateExpression =
+            serde_json::from_value(qualified.clone()).expect("qualified predicate should parse");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("qualified predicate should serialize"),
+            qualified
+        );
+    }
+
+    #[test]
+    fn present_column_binding_must_be_a_non_empty_string() {
+        for invalid_binding in [json!(""), json!(null)] {
+            let expression = json!({
+                "eq": [
+                    { "binding": invalid_binding, "column": "value" },
+                    1
+                ]
+            });
+            serde_json::from_value::<PredicateExpression>(expression)
+                .expect_err("present binding must be a non-empty string");
+        }
+    }
+
+    #[test]
+    fn explicitly_empty_key_fields_are_not_normalized_to_absence() {
+        let mut artifact = minimal_predicate_artifact();
+        artifact["bindings"][0]["key_fields"] = json!([]);
+
+        let error = serde_json::from_value::<ConstraintSet>(artifact)
+            .expect_err("explicitly empty key fields should fail closed");
+        assert!(error.to_string().contains("empty_key_fields"));
     }
 }

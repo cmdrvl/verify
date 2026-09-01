@@ -53,7 +53,7 @@ impl Drop for TempScenario {
 }
 
 fn run_verify_json(compiled: &Path, binds: &[(&str, &Path)]) -> Output {
-    let mut command = Command::new(verify_binary());
+    let mut command = Command::new(verify_binary()); // ubs:ignore — Cargo supplies this trusted test-binary path.
     command.args([
         "run",
         compiled.to_str().expect("compiled path should be utf-8"),
@@ -113,6 +113,7 @@ fn portable_determinism_constraint() -> ConstraintSet {
                 expr: PredicateExpression::Gt {
                     gt: [
                         PredicateOperand::Column(ColumnReference {
+                            binding: None,
                             column: "balance".to_owned(),
                         }),
                         PredicateOperand::Literal(json!(0)),

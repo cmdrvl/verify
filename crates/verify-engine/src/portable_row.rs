@@ -3,8 +3,11 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 use verify_core::{
-    constraint::{Check, MembershipOperand, PredicateExpression, PredicateOperand, Rule},
+    constraint::{
+        Check, MembershipOperand, Portability, PredicateExpression, PredicateOperand, Rule,
+    },
     report::{AffectedEntry, ResultStatus, RuleResult},
+    validation::analyze_predicate,
 };
 
 use crate::Relation;
@@ -80,6 +83,20 @@ pub fn evaluate_rule(
     rule: &Rule,
     relations: &BTreeMap<String, Relation>,
 ) -> Result<RuleResult, EngineError> {
+    if rule.portability != Portability::Portable {
+        return Err(EngineError::UnsupportedOp(format!(
+            "{} (batch_only)",
+            rule.check.op()
+        )));
+    }
+    if let Check::Predicate { binding, expr } = &rule.check
+        && analyze_predicate(binding, expr).derived_portability == Portability::BatchOnly
+    {
+        return Err(EngineError::UnsupportedOp(
+            "binding-qualified predicate".to_owned(),
+        ));
+    }
+
     let affected = match &rule.check {
         Check::Unique { binding, columns } => evaluate_unique(binding, columns, relations)?,
         Check::NotNull { binding, columns } => evaluate_not_null(binding, columns, relations)?,
@@ -910,6 +927,7 @@ mod tests {
                 expr: PredicateExpression::Gt {
                     gt: [
                         PredicateOperand::Column(ColumnReference {
+                            binding: None,
                             column: "balance".to_owned(),
                         }),
                         PredicateOperand::Literal(json!(0)),
@@ -940,6 +958,7 @@ mod tests {
                 expr: PredicateExpression::Gt {
                     gt: [
                         PredicateOperand::Column(ColumnReference {
+                            binding: None,
                             column: "balance".to_owned(),
                         }),
                         PredicateOperand::Literal(json!(0)),
@@ -977,6 +996,7 @@ mod tests {
                 expr: PredicateExpression::Eq {
                     eq: [
                         PredicateOperand::Column(ColumnReference {
+                            binding: None,
                             column: "status".to_owned(),
                         }),
                         PredicateOperand::Literal(json!("active")),
@@ -1008,6 +1028,7 @@ mod tests {
                 expr: PredicateExpression::In {
                     r#in: [
                         MembershipOperand::Operand(PredicateOperand::Column(ColumnReference {
+                            binding: None,
                             column: "match_status".to_owned(),
                         })),
                         MembershipOperand::Set(vec![
@@ -1048,6 +1069,7 @@ mod tests {
                         PredicateExpression::Gt {
                             gt: [
                                 PredicateOperand::Column(ColumnReference {
+                                    binding: None,
                                     column: "balance".to_owned(),
                                 }),
                                 PredicateOperand::Literal(json!(0)),
@@ -1055,6 +1077,7 @@ mod tests {
                         },
                         PredicateExpression::IsBlank {
                             is_blank: ColumnReference {
+                                binding: None,
                                 column: "waiver_reason".to_owned(),
                             },
                         },
@@ -1096,6 +1119,7 @@ mod tests {
                     not: Box::new(PredicateExpression::Eq {
                         eq: [
                             PredicateOperand::Column(ColumnReference {
+                                binding: None,
                                 column: "value".to_owned(),
                             }),
                             PredicateOperand::Literal(json!(0)),
@@ -1127,6 +1151,7 @@ mod tests {
                 binding: "input".to_owned(),
                 expr: PredicateExpression::IsNull {
                     is_null: ColumnReference {
+                        binding: None,
                         column: "opt".to_owned(),
                     },
                 },
@@ -1285,6 +1310,36 @@ mod tests {
 
         let err = evaluate_rule(&rule, &rels).unwrap_err();
         assert!(matches!(err, super::EngineError::UnsupportedOp(_)));
+    }
+
+    #[test]
+    fn binding_qualified_predicates_fail_closed_in_the_portable_engine() {
+        let rule = make_rule(
+            "CROSS_BINDING",
+            Severity::Error,
+            Check::Predicate {
+                binding: "current".to_owned(),
+                expr: PredicateExpression::Eq {
+                    eq: [
+                        PredicateOperand::Column(ColumnReference {
+                            binding: None,
+                            column: "value".to_owned(),
+                        }),
+                        PredicateOperand::Column(ColumnReference {
+                            binding: Some("prior".to_owned()),
+                            column: "value".to_owned(),
+                        }),
+                    ],
+                },
+            },
+        );
+
+        let error = evaluate_rule(&rule, &BTreeMap::new())
+            .expect_err("portable execution must not reinterpret cross-binding references");
+        assert_eq!(
+            error,
+            super::EngineError::UnsupportedOp("binding-qualified predicate".to_owned())
+        );
     }
 
     #[test]

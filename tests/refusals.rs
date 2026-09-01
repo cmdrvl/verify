@@ -129,7 +129,7 @@ fn run_unknown_constraint_field_produces_bad_constraints_refusal() {
                 "check": {
                     "op": "predicate",
                     "binding": "input",
-                    "expr": {"column": "value", "binding": "other"}
+                    "expr": {"column": "value", "unexpected": "other"}
                 }
             }]
         }"#,

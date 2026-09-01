@@ -75,6 +75,7 @@ fn constraints() -> ConstraintSet {
                                 gt: [
                                     verify_core::constraint::PredicateOperand::Column(
                                         verify_core::constraint::ColumnReference {
+                                            binding: None,
                                             column: "amount".to_owned(),
                                         },
                                     ),
@@ -85,6 +86,7 @@ fn constraints() -> ConstraintSet {
                                 not: Box::new(
                                     verify_core::constraint::PredicateExpression::IsBlank {
                                         is_blank: verify_core::constraint::ColumnReference {
+                                            binding: None,
                                             column: "waiver_reason".to_owned(),
                                         },
                                     },

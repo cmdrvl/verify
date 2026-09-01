@@ -289,6 +289,12 @@ impl PortableRuleAuthoring {
             )
         })?;
         let normalized = normalize_predicate_aliases(expr);
+        if contains_explicit_column_binding(&normalized) {
+            return Err(bad_authoring(
+                "predicate expression is invalid: binding-qualified references require compiler support",
+                json!({"rule_id": self.id}),
+            ));
+        }
 
         serde_json::from_value(normalized).map_err(|error| {
             bad_authoring(
@@ -318,6 +324,16 @@ impl PortableRuleAuthoring {
         })?;
         validate_aggregate(&self.id, &aggregate)?;
         Ok(aggregate)
+    }
+}
+
+fn contains_explicit_column_binding(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields.contains_key("binding") || fields.values().any(contains_explicit_column_binding)
+        }
+        Value::Array(values) => values.iter().any(contains_explicit_column_binding),
+        _ => false,
     }
 }
 
