@@ -474,6 +474,11 @@ ubs .
 
 ## Contributing
 
+AI coding agents should read [`AGENTS.md`](./AGENTS.md) before making changes.
+Claude Code users should also read [`CLAUDE.md`](./CLAUDE.md) for the
+machine-local permission and MCP availability boundary; shared project policy
+remains in `AGENTS.md`.
+
 ```bash
 cd verify
 br ready                          # find available work

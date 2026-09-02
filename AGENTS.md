@@ -2,6 +2,12 @@
 
 > Repo-specific guidance for AI coding agents working in `verify`.
 
+This is the universal agent policy for every harness. Claude Code-specific
+notes about ignored local permissions and optional MCP exposure live in
+[CLAUDE.md](./CLAUDE.md); that file does not override this one. No `GEMINI.md`
+or `CODEX.md` is maintained because the repo has no corresponding
+harness-specific configuration to document.
+
 This file adds repo-specific instructions on top of the shared monorepo rules
 when you are working inside the full `cmdrvl` workspace. In the standalone
 `verify` repo, treat this file and [docs/plan.md](./docs/plan.md) as the local
