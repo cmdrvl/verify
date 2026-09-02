@@ -6,6 +6,8 @@ use std::{
 
 use serde_json::Value;
 
+const OPERATOR_JSON: &str = include_str!("../operator.json");
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn verify_command() -> Command {
@@ -165,8 +167,52 @@ fn top_level_capabilities_json_describes_standard_agent_surfaces() {
         payload["standard_agent_surfaces"]["capabilities_json"],
         "verify capabilities --json"
     );
-    assert_eq!(payload["commands"][3]["domain_outcomes"]["1"], "FAIL");
+    assert_eq!(
+        payload["standard_agent_surfaces"]["operator_contract"],
+        "verify --describe"
+    );
+    assert_eq!(payload["protocols"]["operator"], "operator.v0");
+    assert!(
+        payload["commands"]
+            .as_array()
+            .expect("commands should be an array")
+            .iter()
+            .any(|command| command["command"] == "verify --describe"
+                && command["stdout"] == "operator.v0 JSON")
+    );
+    assert!(
+        payload["commands"]
+            .as_array()
+            .expect("commands should be an array")
+            .iter()
+            .any(|command| command["command"]
+                == "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--json] [--no-witness]"
+                && command["domain_outcomes"]["1"] == "FAIL")
+    );
     assert_eq!(payload["doctor"]["schema"], "verify.doctor.capabilities.v1");
+    assert_eq!(
+        payload["composition"]["input_boundary"]["relation_state"],
+        "already_canonical"
+    );
+    assert_eq!(
+        payload["composition"]["input_boundary"]["produced_by"],
+        "profile's bounded materialization"
+    );
+    assert!(
+        payload["composition"]["input_boundary"]["verify_never"]
+            .as_array()
+            .expect("verify_never should be an array")
+            .iter()
+            .any(|entry| entry == "resolves --profile-id")
+    );
+    assert_eq!(
+        payload["composition"]["provenance_boundary"]["canonical_input_profile_provenance"],
+        "lock.v0 profiles[] and pack membership"
+    );
+    assert_eq!(
+        payload["composition"]["provenance_boundary"]["not_in"],
+        "verify.report.v1"
+    );
 }
 
 #[test]
@@ -185,8 +231,62 @@ fn top_level_robot_docs_guide_is_plain_text_and_read_only() {
     assert!(stdout.contains("verify robot-docs guide"));
     assert!(stdout.contains("verify --robot-triage"));
     assert!(stdout.contains("Outcome contract"));
+    assert!(stdout.contains("already-canonical named relations"));
+    assert!(stdout.contains("never loads profiles"));
+    assert!(stdout.contains("lock.v0"));
+    assert!(stdout.contains("not `verify.report.v1`"));
     assert!(stdout.contains("assess"));
     assert!(stdout.contains("pack"));
+}
+
+#[test]
+fn operator_json_is_valid_and_mentions_crv1_boundary() {
+    let manifest: Value =
+        serde_json::from_str(OPERATOR_JSON).expect("operator.json should be valid JSON");
+
+    assert_eq!(manifest["schema_version"], "operator.v0");
+    assert_eq!(manifest["name"], "verify");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["capabilities"]["profile_aware"], false);
+    assert_eq!(manifest["capabilities"]["header_rewriting"], false);
+    assert_eq!(
+        manifest["capabilities"]["crv1_boundary"]["input"],
+        "already-canonical named relations produced upstream by profile's bounded materialization"
+    );
+    assert!(
+        manifest["capabilities"]["crv1_boundary"]["verify_never"]
+            .as_array()
+            .expect("verify_never should be an array")
+            .iter()
+            .any(|entry| entry == "resolves --profile-id")
+    );
+    assert_eq!(
+        manifest["capabilities"]["crv1_boundary"]["provenance"],
+        "canonical input and profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1"
+    );
+}
+
+#[test]
+fn describe_emits_operator_manifest_and_is_read_only() {
+    let witness = isolated_witness_path("describe");
+    let output = verify_command_with_witness(&witness)
+        .arg("--describe")
+        .output()
+        .expect("describe should run");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_witness_absent(&witness);
+
+    let manifest = parse_stdout(&output.stdout);
+    assert_eq!(manifest["schema_version"], "operator.v0");
+    assert_eq!(manifest["name"], "verify");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["capabilities"]["profile_aware"], false);
+    assert_eq!(
+        manifest["capabilities"]["agent_surfaces"]["operator_contract"],
+        "verify --describe"
+    );
 }
 
 #[test]

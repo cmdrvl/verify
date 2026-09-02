@@ -204,7 +204,7 @@ Command family:
 - `verify validate <COMPILED_CONSTRAINTS> [--json]`
 - `verify witness [ACTION] [--json]`
 - `verify --schema`
-- `verify --describe` (currently scaffold-only refusal)
+- `verify --describe`
 
 Refusal envelopes are part of the protocol. Do not replace them with ad hoc
 text or mix diagnostics into stdout evidence.

@@ -5,15 +5,8 @@ pub mod json;
 
 const CONSTRAINT_SCHEMA: &str =
     include_str!("../../../../schemas/verify.constraint.v1.schema.json");
+const OPERATOR_JSON: &str = include_str!("../../../../operator.json");
 const REPORT_SCHEMA: &str = include_str!("../../../../schemas/verify.report.v1.schema.json");
-
-pub fn scaffold_message(surface: &str, json_output: bool) -> String {
-    if json_output {
-        json::scaffold_message(surface)
-    } else {
-        human::scaffold_message(surface)
-    }
-}
 
 /// Render a `VerifyReport` as either JSON or compact human text.
 pub fn render_report(
@@ -32,6 +25,10 @@ pub fn constraint_schema() -> &'static str {
     CONSTRAINT_SCHEMA
 }
 
+pub fn operator_contract() -> &'static str {
+    OPERATOR_JSON
+}
+
 pub fn report_schema() -> &'static str {
     REPORT_SCHEMA
 }
@@ -40,7 +37,7 @@ pub fn report_schema() -> &'static str {
 mod tests {
     use verify_core::report::{ExecutionMode, VerifyReport};
 
-    use super::{constraint_schema, render_report, report_schema, scaffold_message};
+    use super::{constraint_schema, operator_contract, render_report, report_schema};
 
     #[test]
     fn constraint_schema_is_embedded() {
@@ -53,11 +50,12 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_message_switches_by_output_mode() {
-        assert!(scaffold_message("compile portable authoring", true).contains("\"surface\""));
-        assert!(
-            scaffold_message("compile portable authoring", false).contains("verify scaffold only")
-        );
+    fn operator_contract_is_embedded() {
+        let value: serde_json::Value =
+            serde_json::from_str(operator_contract()).expect("operator contract must parse");
+        assert_eq!(value["schema_version"], "operator.v0");
+        assert_eq!(value["name"], "verify");
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

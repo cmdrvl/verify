@@ -6,10 +6,6 @@ use verify_core::{
     report::{Outcome, ResultStatus, VerifyReport},
 };
 
-pub fn scaffold_message(surface: &str) -> String {
-    format!("verify scaffold only: {surface} is not implemented yet")
-}
-
 /// Render a `VerifyReport` as compact human-readable text.
 ///
 /// Format matches plan.md §Output (human):
@@ -201,14 +197,7 @@ mod tests {
         },
     };
 
-    use super::{render_report, scaffold_message};
-
-    #[test]
-    fn scaffold_message_uses_refusal_text() {
-        let message = scaffold_message("validate compiled constraints");
-        assert!(message.contains("verify scaffold only"));
-        assert!(message.contains("validate compiled constraints"));
-    }
+    use super::render_report;
 
     fn pass_report() -> VerifyReport {
         let mut bindings = BTreeMap::new();

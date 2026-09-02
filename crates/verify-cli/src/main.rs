@@ -161,7 +161,11 @@ fn dispatch(cli: Cli) -> DispatchOutcome {
     }
 
     if cli.describe {
-        return refusal_outcome(render::scaffold_message("describe", false));
+        return DispatchOutcome {
+            exit_code: 0,
+            stdout: Some(render::operator_contract().to_owned()),
+            stderr: None,
+        };
     }
 
     if cli.robot_triage {

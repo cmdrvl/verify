@@ -359,6 +359,7 @@ fn top_level_capabilities_value() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "purpose": "Deterministic constraint evaluation for declared relation constraints.",
         "protocols": {
+            "operator": "operator.v0",
             "constraint": CONSTRAINT_VERSION,
             "report": REPORT_VERSION,
             "doctor_health": HEALTH_SCHEMA,
@@ -368,7 +369,8 @@ fn top_level_capabilities_value() -> Value {
         "standard_agent_surfaces": {
             "robot_triage": "verify --robot-triage",
             "capabilities_json": "verify capabilities --json",
-            "robot_docs": "verify robot-docs guide"
+            "robot_docs": "verify robot-docs guide",
+            "operator_contract": "verify --describe"
         },
         "commands": [
             {
@@ -389,6 +391,12 @@ fn top_level_capabilities_value() -> Value {
                 "read_only": true,
                 "writes_witness": false,
                 "stdout": "plain text agent guide"
+            },
+            {
+                "command": "verify --describe",
+                "read_only": true,
+                "writes_witness": false,
+                "stdout": "operator.v0 JSON"
             },
             {
                 "command": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--json] [--no-witness]",
@@ -436,7 +444,20 @@ fn top_level_capabilities_value() -> Value {
             "upstream": ["normalize", "materialize"],
             "factory_upstream": ["twinning", "decoding"],
             "downstream": ["assess", "pack"],
+            "input_boundary": {
+                "relation_state": "already_canonical",
+                "produced_by": "profile's bounded materialization",
+                "verify_never": ["loads profiles", "resolves --profile-id", "rewrites headers"],
+                "constraint_fields": "canonical relation fields"
+            },
+            "provenance_boundary": {
+                "canonical_input_profile_provenance": "lock.v0 profiles[] and pack membership",
+                "not_in": REPORT_VERSION
+            },
             "boundaries": [
+                "verify evaluates already-canonical named relations produced upstream by profile's bounded materialization",
+                "verify never loads profiles, resolves --profile-id, or rewrites headers",
+                "canonical input/profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1",
                 "verify enforces declared constraints",
                 "benchmark scores gold-set correctness",
                 "assess decides proceed, escalate, or block"
@@ -555,6 +576,7 @@ fn human_top_level_capabilities() -> String {
         "- verify --robot-triage",
         "- verify capabilities --json",
         "- verify robot-docs guide",
+        "- verify --describe",
         "domain outcomes:",
         "- 0: PASS",
         "- 1: FAIL",
@@ -586,7 +608,9 @@ fn top_level_robot_docs() -> String {
         "- Doctor, triage, capabilities, robot-docs, schema, and validate surfaces do not append witness records.",
         "",
         "Composition:",
-        "- Use `verify` after normalize/materialize to enforce declared constraints.",
+        "- Use `verify` after profile's bounded materialization has produced already-canonical named relations.",
+        "- `verify` never loads profiles, resolves `--profile-id`, or rewrites headers.",
+        "- CRV1 canonical input/profile provenance rides in `lock.v0` `profiles[]` and pack membership, not `verify.report.v1`.",
         "- Use embedded verify inside twinning/decoding for portable runtime constraints.",
         "- Use `assess` after verify when a proceed/escalate/block decision is needed.",
         "- Use `pack` to bundle reports and evidence.",

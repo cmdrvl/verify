@@ -1,0 +1,370 @@
+{
+  "schema_version": "operator.v0",
+  "name": "verify",
+  "version": "0.3.1",
+  "description": "Deterministic constraint evaluation over already-canonical named relations",
+  "repository": "https://github.com/cmdrvl/verify",
+  "license": "MIT",
+  "agent_guide": "https://github.com/cmdrvl/.github/blob/main/profile/AGENT_PROMPT.md",
+
+  "invocation": {
+    "binary": "verify",
+    "usage": [
+      "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]",
+      "verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]",
+      "verify --robot-triage",
+      "verify capabilities --json",
+      "verify robot-docs guide",
+      "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
+      "verify validate <COMPILED_CONSTRAINTS> [--json]",
+      "verify witness <query|last|count> [--json]",
+      "verify doctor <health|capabilities|robot-docs> [OPTIONS]",
+      "verify doctor --robot-triage"
+    ],
+    "output_mode": "report",
+    "output_schema": "verify.report.v1",
+    "json_flag": "--json",
+    "robot_triage_flag": "--robot-triage"
+  },
+
+  "arguments": [
+    {
+      "name": "compiled_constraints",
+      "type": "file_path",
+      "required": true,
+      "position": 0,
+      "subcommand": "run",
+      "description": "Compiled verify.constraint.v1 artifact"
+    },
+    {
+      "name": "dataset",
+      "type": "file_path",
+      "required": true,
+      "position": 0,
+      "subcommand": "arity_1_shortcut",
+      "description": "Already-canonical relation file bound as input for the shortcut path"
+    }
+  ],
+
+  "options": [
+    {
+      "name": "bind",
+      "flag": "--bind",
+      "type": "NAME=PATH",
+      "description": "Bind a declared relation name to an already-canonical CSV, JSON, JSONL, or Parquet file"
+    },
+    {
+      "name": "lock",
+      "flag": "--lock",
+      "type": "file_path",
+      "description": "Verify bound input byte hashes against provided lock membership before rule evaluation"
+    },
+    {
+      "name": "key",
+      "flag": "--key",
+      "type": "string",
+      "description": "Arity-1 shortcut convenience for bindings[0].key_fields when authoring did not declare a key"
+    },
+    {
+      "name": "json",
+      "flag": "--json",
+      "type": "flag",
+      "description": "Emit verify.report.v1 JSON for run outcomes"
+    },
+    {
+      "name": "sample_affected",
+      "flag": "--sample-affected",
+      "type": "integer",
+      "description": "Limit human output to the first N localized affected entries per failing rule"
+    },
+    {
+      "name": "no_witness",
+      "flag": "--no-witness",
+      "type": "flag",
+      "description": "Suppress local witness ledger recording for this run"
+    },
+    {
+      "name": "describe",
+      "flag": "--describe",
+      "type": "flag",
+      "description": "Print compiled operator.json and exit 0"
+    },
+    {
+      "name": "schema",
+      "flag": "--schema",
+      "type": "flag",
+      "description": "Print verify.report.v1 JSON Schema and exit 0"
+    },
+    {
+      "name": "robot_triage",
+      "flag": "--robot-triage",
+      "type": "flag",
+      "description": "Emit one-call read-only machine triage JSON for agents"
+    },
+    {
+      "name": "version",
+      "flag": "--version",
+      "type": "flag",
+      "description": "Print verify <semver> and exit 0"
+    }
+  ],
+
+  "subcommands": [
+    {
+      "name": "capabilities",
+      "description": "Print the machine-readable verify capability contract",
+      "status": "available",
+      "usage": "verify capabilities --json",
+      "read_only": true,
+      "options": [
+        {
+          "name": "json",
+          "flag": "--json",
+          "type": "flag",
+          "description": "Emit structured JSON output"
+        }
+      ],
+      "current_runtime_behavior": {
+        "schema_version": "verify.capabilities.v1",
+        "writes_witness": false,
+        "writes_files": false,
+        "uses_network": false
+      }
+    },
+    {
+      "name": "robot-docs",
+      "description": "Print paste-ready operating notes for agents",
+      "status": "available",
+      "usage": "verify robot-docs guide",
+      "read_only": true,
+      "actions": [
+        {
+          "name": "guide",
+          "usage": "verify robot-docs guide"
+        }
+      ],
+      "current_runtime_behavior": {
+        "writes_witness": false,
+        "writes_files": false,
+        "uses_network": false
+      }
+    },
+    {
+      "name": "run",
+      "description": "Evaluate compiled constraints against one or more named relation bindings",
+      "status": "available",
+      "usage": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]",
+      "read_only": false,
+      "current_runtime_behavior": {
+        "writes_witness": "unless --no-witness is set",
+        "writes_files": false,
+        "uses_network": false,
+        "emits_report_schema": "verify.report.v1"
+      }
+    },
+    {
+      "name": "compile",
+      "description": "Compile JSON/YAML or SQL authoring into verify.constraint.v1",
+      "status": "available",
+      "usage": "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
+      "read_only": "only with --check or --json and without --out",
+      "current_runtime_behavior": {
+        "writes_outputs": "when --out is set",
+        "writes_witness": false,
+        "uses_network": false
+      }
+    },
+    {
+      "name": "validate",
+      "description": "Validate a compiled verify.constraint.v1 artifact",
+      "status": "available",
+      "usage": "verify validate <COMPILED_CONSTRAINTS> [--json]",
+      "read_only": true,
+      "current_runtime_behavior": {
+        "writes_witness": false,
+        "writes_files": false,
+        "uses_network": false
+      }
+    },
+    {
+      "name": "witness",
+      "description": "Witness ledger query commands",
+      "status": "available",
+      "actions": [
+        {
+          "name": "query",
+          "usage": "verify witness query [--tool <name>] [--since <iso8601>] [--until <iso8601>] [--outcome <PASS|FAIL|REFUSAL>] [--input-hash <substring>] [--limit <n>] [--json]"
+        },
+        {
+          "name": "last",
+          "usage": "verify witness last [--json]"
+        },
+        {
+          "name": "count",
+          "usage": "verify witness count [--tool <name>] [--since <iso8601>] [--until <iso8601>] [--outcome <PASS|FAIL|REFUSAL>] [--input-hash <substring>] [--json]"
+        }
+      ],
+      "current_runtime_behavior": {
+        "success_exit_code": 0,
+        "no_match_exit_code": 1,
+        "error_exit_code": 2,
+        "ledger_path_resolution": [
+          "EPISTEMIC_WITNESS",
+          "~/.cmdrvl/state/witness/witness.jsonl"
+        ]
+      }
+    },
+    {
+      "name": "doctor",
+      "description": "Read-only diagnostics for agents and operators",
+      "status": "available",
+      "usage": "verify doctor <health|capabilities|robot-docs> [OPTIONS] | verify doctor --robot-triage",
+      "read_only": true,
+      "fix_mode": "not_available",
+      "current_runtime_behavior": {
+        "read_only": true,
+        "fix_mode": "not_available",
+        "writes_witness": false,
+        "writes_files": false,
+        "uses_network": false
+      },
+      "actions": [
+        {
+          "name": "health",
+          "usage": "verify doctor health [--json]"
+        },
+        {
+          "name": "capabilities",
+          "usage": "verify doctor capabilities --json"
+        },
+        {
+          "name": "robot-docs",
+          "usage": "verify doctor robot-docs"
+        },
+        {
+          "name": "robot-triage",
+          "usage": "verify doctor --robot-triage"
+        }
+      ]
+    }
+  ],
+
+  "exit_codes": {
+    "0": {
+      "meaning": "PASS / successful read-only command",
+      "domain": "positive"
+    },
+    "1": {
+      "meaning": "FAIL / witness query with no matches",
+      "domain": "negative"
+    },
+    "2": {
+      "meaning": "REFUSAL / CLI error / witness internal error",
+      "domain": "error"
+    }
+  },
+
+  "refusals": [
+    {
+      "code": "E_IO",
+      "message": "Cannot read a constraint source, compiled artifact, bound input, or lockfile",
+      "action": "check_path"
+    },
+    {
+      "code": "E_BAD_CONSTRAINTS",
+      "message": "Compiled artifact invalid or unrecognized version",
+      "action": "recompile_or_fix_constraints"
+    },
+    {
+      "code": "E_BAD_AUTHORING",
+      "message": "JSON/YAML/SQL authoring source invalid",
+      "action": "fix_authoring"
+    },
+    {
+      "code": "E_FIELD_NOT_FOUND",
+      "message": "Rule references a field missing from a bound canonical relation",
+      "action": "fix_constraints_or_upstream_materialization"
+    },
+    {
+      "code": "E_BATCH_ONLY_RULE",
+      "message": "Embedded execution received a batch-only rule",
+      "action": "run_in_batch_or_lower_rule"
+    },
+    {
+      "code": "E_INPUT_NOT_LOCKED",
+      "message": "Bound input not present in any provided lockfile",
+      "action": "provide_correct_lock"
+    },
+    {
+      "code": "E_INPUT_DRIFT",
+      "message": "Bound input hash differs from the lock member",
+      "action": "use_locked_artifact_or_regenerate_lock"
+    }
+  ],
+
+  "capabilities": {
+    "formats": [
+      "csv",
+      "json",
+      "jsonl",
+      "parquet"
+    ],
+    "profile_aware": false,
+    "header_rewriting": false,
+    "streaming": false,
+    "rules": {
+      "portable": [
+        "unique",
+        "not_null",
+        "predicate",
+        "row_count",
+        "aggregate_compare",
+        "foreign_key"
+      ],
+      "batch_only": [
+        "query_zero_rows",
+        "binding-qualified predicate"
+      ]
+    },
+    "crv1_boundary": {
+      "input": "already-canonical named relations produced upstream by profile's bounded materialization",
+      "verify_never": [
+        "loads profile YAML",
+        "resolves --profile-id",
+        "reads column registry files",
+        "rewrites raw headers"
+      ],
+      "constraint_fields": "canonical relation fields",
+      "provenance": "canonical input and profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1"
+    },
+    "agent_surfaces": {
+      "robot_triage": "verify --robot-triage",
+      "capabilities": "verify capabilities --json",
+      "robot_docs": "verify robot-docs guide",
+      "operator_contract": "verify --describe",
+      "doctor": "verify doctor <health|capabilities|robot-docs> [OPTIONS]"
+    },
+    "witness": {
+      "ambient_recording": "enabled_by_default_for_run",
+      "query_subcommands": "available",
+      "no_witness_flag": "suppresses_recording"
+    }
+  },
+
+  "pipeline": {
+    "mode": "canonical_relations",
+    "input": "already-canonical named relations",
+    "example_pipeline": "profile materialize <raw> > canonical.csv; lock ...; verify run constraints.verify.json --bind input=canonical.csv --lock canonical.lock.json --json",
+    "upstream": [
+      "profile",
+      "normalize",
+      "materialize",
+      "shape",
+      "rvl"
+    ],
+    "downstream": [
+      "assess",
+      "pack"
+    ]
+  }
+}

@@ -87,6 +87,7 @@ Inspect the read-only doctor surface for agents and automation:
 ./target/release/verify --robot-triage
 ./target/release/verify capabilities --json
 ./target/release/verify robot-docs guide
+./target/release/verify --describe
 ./target/release/verify doctor health
 ./target/release/verify doctor capabilities --json
 ./target/release/verify doctor robot-docs
@@ -95,8 +96,9 @@ Inspect the read-only doctor surface for agents and automation:
 
 `verify --robot-triage` is the fastest read-only machine entrypoint for
 automation. `verify capabilities --json` exposes the stable command contract,
-domain exit codes, witness behavior, and protocol versions. `verify robot-docs
-guide` prints the agent-facing quick guide.
+domain exit codes, witness behavior, protocol versions, and CRV1 canonical
+relation boundary. `verify robot-docs guide` prints the agent-facing quick
+guide. `verify --describe` prints the compiled `operator.v0` manifest.
 
 ---
 
@@ -207,7 +209,7 @@ verify doctor capabilities --json
 verify doctor robot-docs
 verify doctor --robot-triage
 verify --schema
-verify --describe   # currently returns a scaffold refusal
+verify --describe
 ```
 
 The doctor surface is read-only. It does not read bound inputs, execute rules,

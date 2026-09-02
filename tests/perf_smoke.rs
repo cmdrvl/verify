@@ -22,10 +22,6 @@ use serde_json::Value;
 
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
-fn verify_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_verify"))
-}
-
 fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "verify-perf-{name}-{}-{}",
@@ -103,7 +99,7 @@ fn arity1_pass_10k_rows_completes_under_budget() {
 
     let output = {
         let _guard = timer.phase("cli_run_json");
-        Command::new(verify_binary())
+        Command::new(env!("CARGO_BIN_EXE_verify"))
             .args([
                 "run",
                 fixture.constraint_path.to_str().unwrap(),
@@ -153,7 +149,7 @@ fn arity1_fail_10k_rows_completes_under_budget() {
 
     let output = {
         let _guard = timer.phase("cli_run_json");
-        Command::new(verify_binary())
+        Command::new(env!("CARGO_BIN_EXE_verify"))
             .args([
                 "run",
                 fixture.constraint_path.to_str().unwrap(),
@@ -204,7 +200,7 @@ fn arity_n_pass_10k_rows_completes_under_budget() {
         .map(|(name, path)| format!("{name}={}", path.display()))
         .collect();
 
-    let mut cmd = Command::new(verify_binary());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_verify"));
     cmd.args(["run", fixture.constraint_path.to_str().unwrap()]);
     for bind in &bind_args {
         cmd.args(["--bind", bind]);
@@ -251,7 +247,7 @@ fn shortcut_10k_rows_compile_and_evaluate_under_budget() {
 
     let output = {
         let _guard = timer.phase("shortcut_full");
-        Command::new(verify_binary())
+        Command::new(env!("CARGO_BIN_EXE_verify"))
             .args([
                 fixture.bindings[0].1.to_str().unwrap(),
                 "--rules",
@@ -299,7 +295,7 @@ fn human_render_10k_rows_under_budget() {
 
     let output = {
         let _guard = timer.phase("cli_run_human");
-        Command::new(verify_binary())
+        Command::new(env!("CARGO_BIN_EXE_verify"))
             .args([
                 "run",
                 fixture.constraint_path.to_str().unwrap(),
