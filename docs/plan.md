@@ -151,8 +151,8 @@ These are engineering contracts, not aspirations. If any are violated,
    than silently ignoring or approximating them.
 5. Failure localization is first-class. Failed results must identify affected
    bindings and, when available, keys and fields.
-6. Reports are deterministic. Same bindings + same compiled constraint bytes
-   produce the same ordered report bytes.
+6. Reports are deterministic. Same compiled constraint bytes plus same bound
+   relation bytes produce the same ordered report bytes.
 7. `verify` never becomes a correctness scorer. Gold truth belongs to
    `benchmark`, and policy decisions belong to `assess`.
 
@@ -161,6 +161,8 @@ These are engineering contracts, not aspirations. If any are violated,
 `verify` will not:
 
 - resolve canonical entities
+- load profiles, resolve `--profile-id`, expand column registries, or rewrite
+  raw input headers
 - perform extraction from source documents
 - own the tournament scorer
 - replace `benchmark`
@@ -798,6 +800,22 @@ Bindings are named relations, not "files". Batch execution happens to satisfy
 bindings from files; embedded execution satisfies bindings from in-memory
 relations.
 
+`verify` evaluates relations after upstream profile materialization has already
+made them canonical. Column alias resolution, column registry lookup, and raw
+header rewriting belong to the profile/materialize stage before `verify` runs.
+The runtime never loads profile YAML, resolves `--profile-id`, reads registry
+files, or translates provider-specific headers. A bound relation's exposed field
+names are the field names in the constraint contract; if a rule names a missing
+field, the normal `E_FIELD_NOT_FOUND` refusal applies.
+
+Compiled constraints therefore name canonical fields rather than servicer- or
+format-specific source headers. The same `verify.constraint.v1` artifact can be
+reused across raw schemas once each input has been materialized into the
+canonical relation shape upstream. In arity-N runs, binding identity remains
+per named binding: each `bindings.<name>` report entry carries its own source
+label, content hash, and optional lock verification status so different raw
+schemas, materialized outputs, or profile bundles cannot be conflated.
+
 Bindings may optionally declare `key_fields`. When present, the tuple must be
 non-empty and contain unique field names. Most rule kinds do not require a key,
 but binding-qualified predicates require one on every participating binding.
@@ -932,6 +950,17 @@ Minimum shape:
 | `content_hash` | string | no | Content hash of the bound relation input |
 | `input_verification` | object | yes | Present when `--lock` verification was requested |
 
+These are the complete binding-level provenance fields in `verify.report.v1`.
+`verify` reports the executor source label, the bound relation content hash, and
+when lock checking was requested, `input_verification.status` plus the lock
+names that verified the input. CRV1 profile provenance is deliberately not a
+report field: `lock.v0` owns canonical input byte hashes and `profiles[]`
+metadata, including `profile_sha256` and any `column_registry_hash`, while
+`pack` owns the final membership relationship among profiles, locks, canonical
+inputs, constraints, and reports. `verify` consumes lock membership only to
+prove the named binding bytes it is evaluating; it does not interpret profile
+fields or copy them into a per-tool receipt.
+
 #### Rule result fields
 
 | Field | Type | Nullable | Notes |
@@ -972,7 +1001,17 @@ For batch runs, reports must also preserve:
 - lock verification status when `--lock` was used
 
 For embedded runs, `bindings.<name>.source` is an executor-supplied stable label
-rather than a filesystem path.
+rather than a filesystem path. Embedded callers provide the same structured
+binding identity and already-canonical relation contents directly; embedded
+execution never performs filesystem profile resolution.
+
+Receipt, input, or profile mismatches are refused by the layer that validates
+that evidence. When `verify` checks locks, an unreadable or unsupported lock
+remains an `E_IO` lock refusal, a missing bound input member remains
+`E_INPUT_NOT_LOCKED`, and a content-hash mismatch remains `E_INPUT_DRIFT`.
+Unsupported profile versions, profile/registry mismatches, and profile-pack
+membership defects belong to `profile`, `lock`, or `pack` unless they alter the
+canonical binding bytes or lock membership that `verify` actually evaluates.
 
 For factory use, the report must also preserve enough structure to map a failed
 constraint back to affected entity/bucket candidates. That means `affected`
@@ -1168,11 +1207,35 @@ The spine batch executor:
 
 This is the reference implementation for deterministic behavior.
 
+In a CRV1 replay, the profile stage freezes a profile whose canonical bytes
+include `column_registry_hash` when a column registry is configured, then
+materializes a raw servicer file into a canonical relation such as
+`canonical/loans.csv`. `shape` and `rvl` compare canonical relations, while
+`verify` evaluates constraints whose fields already match that canonical schema:
+
+```bash
+verify run constraints/loan_tape.monthly.v1.verify.json \
+  --bind current=canonical/current_loans.csv \
+  --bind prior=canonical/prior_loans.csv \
+  --lock canonical.lock.json \
+  --json
+```
+
+The resulting report records `current` and `prior` as separate binding
+identities and records only their source labels, content hashes, and lock
+verification status. The profile bundle and registry hash are carried by
+`lock.v0 profiles[]` and by the eventual pack membership, so replay can prove
+which canonicalization inputs produced the bound relation without making
+`verify` profile-aware. Companion CRV1 work is tracked in profile `bd-3bg`,
+`bd-1ag`, `bd-390`, and `bd-2w7`, shape `bd-1y1d`, rvl `bd-3qg`, and the
+closed won't-do verify receipt bead `bd-1bh`; this design amendment is
+`bd-21h`.
+
 ### Factory runtime executor
 
 The factory runtime executor is an embedded use of the same protocol:
 
-- `twinning` materializes candidate state as named relations
+- `twinning` materializes already-canonical candidate state as named relations
 - the runtime loads `verify.constraint.v1`
 - portable rules are evaluated incrementally
 - failures map back to affected buckets/entities/fields
@@ -1259,7 +1322,9 @@ A self-consistent answer can still be wrong.
 - `I13` Input integrity invariant: when `--lock` is provided, all referenced
   bound inputs must verify before rule evaluation proceeds.
 - `I14` Determinism invariant: same compiled constraint bytes and same bound
-  relation contents produce the same ordered report bytes.
+  relation bytes produce the same ordered report bytes. Profile receipts and
+  pack membership do not alter report identity unless they change the
+  canonical binding bytes or lock verification surface that `verify` consumes.
 - `I15` Blank semantics invariant: `not_null` fails on null, empty string, and
   whitespace-only string for string-like batch inputs.
 - `I16` Predicate grammar invariant: all portable predicate expressions reduce
