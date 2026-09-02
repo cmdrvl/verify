@@ -1,0 +1,29 @@
+[
+  {
+    "asset_number": null,
+    "class_code": "A",
+    "maturity_date": "M2030-01-01",
+    "amount": 90,
+    "status": "open",
+    "note": " ",
+    "active": true
+  },
+  {
+    "asset_number": "LN-200",
+    "class_code": "B",
+    "maturity_date": "M2031-06-30",
+    "amount": 190,
+    "status": "closed",
+    "note": " ",
+    "active": true
+  },
+  {
+    "asset_number": "LN-300",
+    "class_code": "C",
+    "maturity_date": "M2032-12-31",
+    "amount": 290,
+    "status": "open",
+    "note": " ",
+    "active": true
+  }
+]

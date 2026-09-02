@@ -309,6 +309,64 @@ fn embedded_executor_refuses_batch_only_rules() {
 }
 
 #[test]
+fn embedded_executor_refuses_binding_qualified_predicate_without_approximation() {
+    let constraints: ConstraintSet = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/constraints/binding_qualified/maturity_date_immutable.verify.json"
+    )))
+    .expect("binding-qualified fixture should parse");
+    let bindings = BTreeMap::from([
+        (
+            "current".to_owned(),
+            EmbeddedBinding::new(
+                "embedded://current",
+                "sha256:current",
+                Relation::new(
+                    vec!["loan_id".to_owned(), "tranche_id".to_owned()],
+                    vec![BTreeMap::from([
+                        ("loan_id".to_owned(), json!("LN-100")),
+                        ("tranche_id".to_owned(), json!("A")),
+                        ("maturity_date".to_owned(), json!("2030-01-01")),
+                    ])],
+                ),
+            ),
+        ),
+        (
+            "prior".to_owned(),
+            EmbeddedBinding::new(
+                "embedded://prior",
+                "sha256:prior",
+                Relation::new(
+                    vec!["asset_number".to_owned(), "class_code".to_owned()],
+                    vec![BTreeMap::from([
+                        ("asset_number".to_owned(), json!("LN-100")),
+                        ("class_code".to_owned(), json!("A")),
+                        ("maturity_date".to_owned(), json!("2030-01-01")),
+                    ])],
+                ),
+            ),
+        ),
+    ]);
+
+    let report = EmbeddedExecutor::evaluate(&constraints, "sha256:constraint", &bindings);
+    let refusal = report.refusal.expect("batch-only predicate should refuse");
+
+    assert_eq!(report.execution_mode, ExecutionMode::Embedded);
+    assert_eq!(report.outcome, Outcome::Refusal);
+    assert!(report.results.is_empty());
+    assert_eq!(refusal.code, RefusalCode::BatchOnlyRule);
+    assert_eq!(
+        refusal.detail,
+        json!({
+            "rule_id": "MATURITY_DATE_IMMUTABLE",
+            "op": "predicate",
+            "execution_mode": "embedded",
+        })
+    );
+    assert_eq!(refusal.next_step, "Lower the rule or run in batch mode.");
+}
+
+#[test]
 fn embedded_executor_refuses_incomparable_predicate_operands_with_context() {
     let constraints = ConstraintSet {
         version: verify_core::CONSTRAINT_VERSION.to_owned(),

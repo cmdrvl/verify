@@ -35,6 +35,18 @@ path = "../../tests/portable_rules.rs"
 name = "refusals"
 path = "../../tests/refusals.rs"
 
+[[test]]
+name = "binding_qualified_predicates"
+path = "../../tests/binding_qualified_predicates.rs"
+
+[[test]]
+name = "binding_qualified_refusals"
+path = "../../tests/binding_qualified_refusals.rs"
+
+[[test]]
+name = "binding_qualified_determinism"
+path = "../../tests/binding_qualified_determinism.rs"
+
 [dependencies]
 clap.workspace = true
 duckdb = "1.4.4"

@@ -1,0 +1,4 @@
+loan_id,tranche_id,maturity_date,amount,status,note,nullable_value,active
+LN-100,A,M2030-01-01,100,open," ",,true
+LN-200,B,M2031-06-30,200,closed," ",,true
+LN-300,C,M2032-12-31,300,open," ",,true

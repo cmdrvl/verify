@@ -1,0 +1,4 @@
+asset_number,class_code,maturity_date,amount,status,note,nullable_value,active
+LN-200,B,M2031-06-30,190,closed," ",,true
+LN-300,C,M2032-12-31,290,open," ",,true
+LN-999,Z,M2040-01-01,390,open," ",,true

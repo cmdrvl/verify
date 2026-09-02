@@ -5,13 +5,15 @@ use clap::{ArgAction, Args};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use verify_core::{
-    constraint::{Check, ConstraintSet, Rule},
+    constraint::{Check, ConstraintSet, Portability, Rule},
     order::sort_report,
     refusal::RefusalCode,
-    report::{ExecutionMode, InputVerification, Outcome, VerifyReport},
+    report::{BindingReport, ExecutionMode, InputVerification, Outcome, VerifyReport},
+    validation::validate_constraint_predicates,
 };
 use verify_duckdb::{
-    BatchBindingInput, BatchBindingLimits, BindingRegistry, execute_query_rules,
+    BatchBindingInput, BatchBindingLimits, BindingPredicateError, BindingRegistry,
+    duckdb_value_to_protocol, evaluate_binding_predicate, execute_query_rules,
     prepare_batch_context, verify_locks,
 };
 use verify_engine::{Relation, SummaryEngine, portable_relation, portable_row};
@@ -194,7 +196,10 @@ fn run_batch_inner(args: &RunArgs) -> Result<VerifyReport, VerifyReport> {
             )
         })?;
 
-    // 4. Parse --bind NAME=PATH arguments.
+    // 4. Validate the compiled contract before reading any bound input.
+    validate_compiled_constraints(&constraints, &constraint_hash)?;
+
+    // 5. Parse --bind NAME=PATH arguments.
     let inputs = parse_bind_args(&args.binds).map_err(|message| {
         batch_refusal_ctx(
             &constraints.constraint_set_id,
@@ -205,7 +210,7 @@ fn run_batch_inner(args: &RunArgs) -> Result<VerifyReport, VerifyReport> {
         )
     })?;
 
-    // 5. Prepare DuckDB context (loads all bindings as temp tables).
+    // 6. Prepare DuckDB context (loads all bindings as temp tables).
     let limits = BatchBindingLimits {
         max_bytes: args.common.max_bytes,
         max_rows: args.common.max_rows,
@@ -222,7 +227,7 @@ fn run_batch_inner(args: &RunArgs) -> Result<VerifyReport, VerifyReport> {
         )
     })?;
 
-    // 6. Optional lock verification.
+    // 7. Optional lock verification.
     let lock_results = verify_locks_if_present(
         &args.common.locks,
         context.bindings(),
@@ -230,7 +235,7 @@ fn run_batch_inner(args: &RunArgs) -> Result<VerifyReport, VerifyReport> {
         &constraint_hash,
     )?;
 
-    // 7. Evaluate all rules.
+    // 8. Evaluate all rules.
     evaluate_batch(&constraints, &constraint_hash, context, lock_results)
 }
 
@@ -328,8 +333,13 @@ fn evaluate_batch(
         }
     }
 
-    // Materialize DuckDB tables into Relations for portable evaluation.
-    let relations = materialize_all_bindings(&connection, &registry, constraints, constraint_hash)?;
+    // Materialize DuckDB tables only when at least one rule routes to the
+    // portable engine. Pure batch-only runs stay entirely inside DuckDB.
+    let relations = if constraints.rules.iter().any(routes_to_portable_engine) {
+        materialize_all_bindings(&connection, &registry, constraints, constraint_hash)?
+    } else {
+        BTreeMap::new()
+    };
 
     // Initialize report.
     let mut report = VerifyReport::new(
@@ -339,10 +349,21 @@ fn evaluate_batch(
     );
     report.bindings = bindings;
 
-    // Evaluate portable rules (skip query_zero_rows — handled separately).
+    // Evaluate portable rules and binding-qualified batch predicates. Query
+    // rules remain on their dedicated batch path below.
     for rule in &constraints.rules {
         let result = match &rule.check {
             Check::QueryZeroRows { .. } => continue,
+            Check::Predicate { .. } if rule.portability == Portability::BatchOnly => {
+                evaluate_binding_predicate(rule, &connection, &registry).map_err(|error| {
+                    binding_predicate_refusal(
+                        constraints,
+                        constraint_hash,
+                        &report.bindings,
+                        &error,
+                    )
+                })?
+            }
             Check::Unique { .. } | Check::NotNull { .. } | Check::Predicate { .. } => {
                 portable_row::evaluate_rule(rule, &relations).map_err(|error| {
                     portable_row_refusal(constraints, constraint_hash, rule, &error)
@@ -388,6 +409,67 @@ fn evaluate_batch(
     sort_report(&mut report);
 
     Ok(report)
+}
+
+fn routes_to_portable_engine(rule: &Rule) -> bool {
+    match &rule.check {
+        Check::QueryZeroRows { .. } => false,
+        Check::Predicate { .. } => rule.portability == Portability::Portable,
+        _ => true,
+    }
+}
+
+fn validate_compiled_constraints(
+    constraints: &ConstraintSet,
+    constraint_hash: &str,
+) -> Result<(), VerifyReport> {
+    if constraints.version != verify_core::CONSTRAINT_VERSION {
+        return Err(batch_refusal_ctx(
+            &constraints.constraint_set_id,
+            constraint_hash,
+            RefusalCode::BadConstraints,
+            format!(
+                "unexpected constraint version: expected {}, got {}",
+                verify_core::CONSTRAINT_VERSION,
+                constraints.version
+            ),
+            json!({
+                "expected_version": verify_core::CONSTRAINT_VERSION,
+                "actual_version": constraints.version,
+            }),
+        ));
+    }
+
+    validate_constraint_predicates(constraints)
+        .map(|_| ())
+        .map_err(|error| {
+            batch_refusal_ctx(
+                &constraints.constraint_set_id,
+                constraint_hash,
+                RefusalCode::BadConstraints,
+                format!("invalid compiled constraints: {error}"),
+                error.detail,
+            )
+        })
+}
+
+fn binding_predicate_refusal(
+    constraints: &ConstraintSet,
+    constraint_hash: &str,
+    bindings: &BTreeMap<String, BindingReport>,
+    error: &BindingPredicateError,
+) -> VerifyReport {
+    let refusal = error.to_refusal();
+    let mut report = VerifyReport::refusal(
+        ExecutionMode::Batch,
+        constraints.constraint_set_id.clone(),
+        constraint_hash,
+        refusal.code,
+        refusal.message,
+        refusal.detail,
+    );
+    report.bindings = bindings.clone();
+    report
 }
 
 fn portable_row_refusal(
@@ -455,10 +537,12 @@ fn materialize_relation(
     connection: &duckdb::Connection,
     relation_name: &str,
     key_fields: Vec<String>,
-) -> Result<Relation, duckdb::Error> {
+) -> Result<Relation, String> {
     let query = format!("SELECT * FROM {relation_name}");
-    let mut statement = connection.prepare(&query)?;
-    let mut duckdb_rows = statement.query([])?;
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| error.to_string())?;
+    let mut duckdb_rows = statement.query([]).map_err(|error| error.to_string())?;
 
     let column_count = duckdb_rows.as_ref().expect("rows ref").column_count();
     let column_names: Vec<String> = (0..column_count)
@@ -472,36 +556,18 @@ fn materialize_relation(
         .collect();
 
     let mut rows = Vec::new();
-    while let Some(row) = duckdb_rows.next()? {
+    while let Some(row) = duckdb_rows.next().map_err(|error| error.to_string())? {
         let mut row_map = BTreeMap::new();
         for (i, col_name) in column_names.iter().enumerate() {
-            let duck_value: duckdb::types::Value = row.get(i).unwrap_or(duckdb::types::Value::Null);
-            row_map.insert(col_name.clone(), duckdb_value_to_json(duck_value));
+            let duck_value: duckdb::types::Value = row.get(i).map_err(|error| error.to_string())?;
+            let protocol_value = duckdb_value_to_protocol(duck_value)
+                .map_err(|error| format!("column {col_name}: {error}"))?;
+            row_map.insert(col_name.clone(), protocol_value);
         }
         rows.push(row_map);
     }
 
     Ok(Relation::new(key_fields, rows))
-}
-
-/// Convert a DuckDB value to a serde_json Value for portable evaluation.
-fn duckdb_value_to_json(value: duckdb::types::Value) -> Value {
-    match value {
-        duckdb::types::Value::Null => Value::Null,
-        duckdb::types::Value::Boolean(b) => Value::Bool(b),
-        duckdb::types::Value::TinyInt(n) => Value::Number(n.into()),
-        duckdb::types::Value::SmallInt(n) => Value::Number(n.into()),
-        duckdb::types::Value::Int(n) => Value::Number(n.into()),
-        duckdb::types::Value::BigInt(n) => Value::Number(n.into()),
-        duckdb::types::Value::Float(f) => {
-            serde_json::Number::from_f64(f64::from(f)).map_or(Value::Null, Value::Number)
-        }
-        duckdb::types::Value::Double(f) => {
-            serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number)
-        }
-        duckdb::types::Value::Text(s) => Value::String(s),
-        _ => Value::String(format!("{value:?}")),
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,16 @@ General batch path:
   --json
 ```
 
+Binding-qualified batch predicate over positionally aligned composite keys:
+
+```bash
+./target/release/verify run \
+  fixtures/constraints/binding_qualified/maturity_date_immutable.verify.json \
+  --bind current=fixtures/inputs/binding_qualified/current.csv \
+  --bind prior=fixtures/inputs/binding_qualified/prior_matching.csv \
+  --json
+```
+
 Preview the first few localized failures directly in human output:
 
 ```bash
@@ -121,8 +131,8 @@ You provide:
 - **One compiled contract.** JSON/YAML authoring and SQL authoring both compile
   into `verify.constraint.v1`.
 - **Portable and batch-only rules are explicit.** Portable rules mean the same
-  thing in batch and embedded execution. Batch-only query rules never silently
-  downgrade.
+  thing in batch and embedded execution. Batch-only query rules and
+  binding-qualified predicates never silently downgrade.
 - **Failure localization is first-class.** Reports identify failing rules,
   implicated bindings, and when possible keys, rows, and fields.
 - **Deterministic reports.** Same compiled constraints plus same bound inputs
@@ -255,12 +265,48 @@ Portable rule ops:
 - `aggregate_compare`
 - `foreign_key`
 
-Batch-only rule op:
+Batch-only execution cases:
 
 - `query_zero_rows`
+- `predicate` when any column reference names a binding other than its anchor
+
+A predicate column reference may optionally include `binding`:
+
+```json
+{
+  "id": "MATURITY_DATE_IMMUTABLE",
+  "severity": "error",
+  "portability": "batch_only",
+  "check": {
+    "op": "predicate",
+    "binding": "current",
+    "expr": {
+      "eq": [
+        { "column": "maturity_date" },
+        { "binding": "prior", "column": "maturity_date" }
+      ]
+    }
+  }
+}
+```
+
+`check.binding` remains the anchor. Omitted reference bindings resolve to that
+anchor. Every participating binding must declare a non-empty `key_fields`
+tuple of equal arity; physical key names may differ because tuples align by
+position. The batch executor evaluates each anchor row once, ignores rows found
+only in non-anchor bindings, and refuses ambiguous or missing counterparts.
+
+Structural and scalar defects use stable refusal codes:
+
+- `E_FIELD_NOT_FOUND` for missing key or operand fields
+- `E_KEY_INVALID` for null, non-scalar, unrepresentable, or type-incompatible keys
+- `E_KEY_AMBIGUOUS` for duplicate participant keys
+- `E_KEY_UNMATCHED` for an anchor key without a counterpart
+- `E_BAD_EXPR` for incomparable predicate operands
 
 SQL authoring compiles into batch-only rules. Embedded execution refuses
-batch-only rules with explicit refusal semantics.
+all batch-only rules with `E_BATCH_ONLY_RULE`; it does not approximate
+binding-qualified predicates. Portable cross-binding lowering is deferred.
 
 ---
 
@@ -338,6 +384,8 @@ One primitive with two execution contexts:
 
 - reads bound inputs from disk (CSV, row-oriented JSON, JSONL, and Parquet)
 - evaluates portable and batch-only rules
+- loads every named relation once into one in-memory `BatchContext`
+- evaluates binding-qualified predicates through deterministic keyed joins
 - can verify bound inputs against lockfiles
 - is the reference executor
 
@@ -362,7 +410,7 @@ verify/
 ├── crates/
 │   ├── verify-core/        # domain types: constraint, report, refusal, ordering
 │   ├── verify-engine/      # portable rule evaluation + embedded executor
-│   ├── verify-duckdb/      # batch bindings, query_zero_rows, lock verification
+│   ├── verify-duckdb/      # batch bindings, keyed predicates, query rules, locks
 │   └── verify-cli/         # CLI surface: run, compile, validate, witness, doctor, render
 ├── fixtures/
 │   ├── authoring/          # YAML and SQL authoring fixtures
@@ -377,6 +425,9 @@ verify/
 │   └── ubs_gate.sh
 ├── tests/
 │   ├── cli.rs              # CLI exit/output integration tests
+│   ├── binding_qualified_predicates.rs  # cross-binding PASS/FAIL conformance
+│   ├── binding_qualified_refusals.rs    # keyed predicate refusal contract
+│   ├── binding_qualified_determinism.rs # row-order and byte determinism
 │   ├── determinism.rs      # byte-identical report determinism proof
 │   ├── embedding_equivalence.rs  # batch/embedded parity
 │   ├── lock_integration.rs # lock verification tests

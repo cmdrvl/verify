@@ -49,7 +49,8 @@ What `verify` does not own:
 
 ## Current Repository State
 
-The v0 implementation is **landed and passing all quality gates**.
+The v0 implementation and the post-v0 binding-qualified batch predicate
+extension are **landed and passing all quality gates**.
 
 The Rust workspace contains four crates (`verify-core`, `verify-engine`,
 `verify-duckdb`, `verify-cli`) with a working `verify` binary, CI workflows,
@@ -120,13 +121,17 @@ repo direction is one `verify` primitive with two execution contexts.
 | `crates/verify-core/src/report.rs` | `verify.report.v1` types |
 | `crates/verify-core/src/refusal.rs` | refusal codes and detail schemas |
 | `crates/verify-core/src/order.rs` | canonical ordering helpers |
+| `crates/verify-core/src/validation.rs` | predicate analysis, portability, and key-contract validation |
 | `crates/verify-engine/src/lib.rs` | portable and embedded execution surface |
 | `crates/verify-engine/src/portable_row.rs` | `unique`, `not_null`, `predicate` |
 | `crates/verify-engine/src/portable_relation.rs` | `row_count`, `aggregate_compare`, `foreign_key` |
+| `crates/verify-engine/src/scalar.rs` | shared protocol scalar semantics |
 | `crates/verify-engine/src/summary.rs` | summary math and policy signals |
 | `crates/verify-engine/src/embedded.rs` | embedded portable executor |
-| `crates/verify-duckdb/src/lib.rs` | batch binding and query-rule surface |
+| `crates/verify-duckdb/src/lib.rs` | batch binding and batch-only execution surface |
 | `crates/verify-duckdb/src/bindings.rs` | CSV/JSON/JSONL/Parquet loading |
+| `crates/verify-duckdb/src/scalar.rs` | typed DuckDB-to-protocol scalar conversion |
+| `crates/verify-duckdb/src/binding_predicates.rs` | keyed binding-qualified predicate executor |
 | `crates/verify-duckdb/src/query_rules.rs` | `query_zero_rows` executor |
 | `crates/verify-duckdb/src/lock_check.rs` | lock verification |
 | `crates/verify-cli/src/main.rs` | thin binary entrypoint only |
@@ -142,6 +147,9 @@ repo direction is one `verify` primitive with two execution contexts.
 | `schemas/*.json` | schema contracts |
 | `fixtures/**` | authoring, inputs, locks, reports |
 | `tests/cli.rs` | CLI exit/output integration tests |
+| `tests/binding_qualified_predicates.rs` | batch predicate PASS/FAIL and grammar conformance |
+| `tests/binding_qualified_refusals.rs` | batch predicate refusal conformance |
+| `tests/binding_qualified_determinism.rs` | byte and row-order determinism conformance |
 | `tests/schema_contract.rs` | fixture/schema round-trip validation |
 | `tests/portable_rules.rs` | full compile → bind → evaluate pipeline |
 | `tests/query_rules.rs` | query_zero_rows localization tests |
@@ -158,7 +166,8 @@ Critical structural rules:
 - `main.rs` stays thin
 - protocol types live in `verify-core`, not in CLI code
 - portable rule semantics live in `verify-engine`, not in DuckDB code
-- batch file loading and query-rule execution live in `verify-duckdb`
+- batch file loading, query-rule execution, and binding-qualified predicate
+  execution live in `verify-duckdb`
 - compile and render surfaces stay pre-split for swarm parallelism
 
 ---
@@ -231,9 +240,12 @@ approximate or reinterpret them.
 
 ### 4. Batch-only rules stay explicit
 
-`query_zero_rows` is batch-only in v0.
+`query_zero_rows` and predicates that reference a binding other than their
+anchor are batch-only.
 
-Embedded execution must refuse it with explicit refusal semantics.
+Embedded execution must refuse both with explicit refusal semantics. Portable
+cross-binding lowering remains deferred; do not approximate it in
+`verify-engine`.
 
 ### 5. Failure localization is first-class
 
@@ -287,12 +299,17 @@ Portable v0 rule kinds:
 - `aggregate_compare`
 - `foreign_key`
 
-Batch-only v0 rule kind:
+Batch-only execution cases:
 
 - `query_zero_rows`
+- `predicate` with at least one distinct-binding column reference
 
-This division is constitutional for the implementation. If a new rule does not
-fit either tier cleanly, stop and update the plan first.
+Binding-qualified predicates execute over the existing DuckDB `BatchContext`
+using positionally aligned, non-empty key tuples. Their stable runtime refusals
+are `E_FIELD_NOT_FOUND`, `E_KEY_INVALID`, `E_KEY_AMBIGUOUS`,
+`E_KEY_UNMATCHED`, and `E_BAD_EXPR`. This division is constitutional for the
+implementation. If a new rule does not fit either tier cleanly, stop and update
+the plan first.
 
 ---
 
@@ -338,6 +355,9 @@ Named test suite coverage (all implemented):
 
 - `schema_contract` — fixture/schema round-trips
 - `portable_rules` — compile → bind → evaluate pipeline
+- `binding_qualified_predicates` — compile/validate plus batch PASS/FAIL grammar coverage
+- `binding_qualified_refusals` — keyed predicate refusal envelopes and precedence
+- `binding_qualified_determinism` — byte identity and row-order invariance
 - `query_rules` — query_zero_rows localization
 - `refusals` — refusal path coverage
 - `lock_integration` — lock verification
