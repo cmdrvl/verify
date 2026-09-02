@@ -9,12 +9,14 @@ use verify_core::{
     order::sort_report,
     refusal::RefusalCode,
     report::{BindingReport, ExecutionMode, InputVerification, Outcome, VerifyReport},
-    validation::validate_constraint_predicates,
+    validation::{
+        portable_relation_columns, routes_to_portable_engine, validate_constraint_predicates,
+    },
 };
 use verify_duckdb::{
     BatchBindingInput, BatchBindingLimits, BindingPredicateError, BindingRegistry,
     duckdb_value_to_protocol, evaluate_binding_predicate, execute_query_rules,
-    prepare_batch_context, verify_locks,
+    prepare_batch_context, quote_identifier, verify_locks,
 };
 use verify_engine::{Relation, SummaryEngine, portable_relation, portable_row};
 
@@ -411,14 +413,6 @@ fn evaluate_batch(
     Ok(report)
 }
 
-fn routes_to_portable_engine(rule: &Rule) -> bool {
-    match &rule.check {
-        Check::QueryZeroRows { .. } => false,
-        Check::Predicate { .. } => rule.portability == Portability::Portable,
-        _ => true,
-    }
-}
-
 fn validate_compiled_constraints(
     constraints: &ConstraintSet,
     constraint_hash: &str,
@@ -508,6 +502,7 @@ fn materialize_all_bindings(
     constraints: &ConstraintSet,
     constraint_hash: &str,
 ) -> Result<BTreeMap<String, Relation>, VerifyReport> {
+    let requested_columns = portable_relation_columns(constraints);
     let mut relations = BTreeMap::new();
     for (name, loaded) in registry.iter() {
         let key_fields = constraints
@@ -517,17 +512,34 @@ fn materialize_all_bindings(
             .map(|b| b.key_fields.clone())
             .unwrap_or_default();
 
-        let relation = materialize_relation(connection, loaded.relation_name(), key_fields)
-            .map_err(|error| {
-                VerifyReport::refusal(
-                    ExecutionMode::Batch,
-                    constraints.constraint_set_id.clone(),
-                    constraint_hash,
-                    RefusalCode::SqlError,
-                    format!("failed to materialize binding {name}: {error}"),
-                    json!({ "binding": name, "error": error.to_string() }),
-                )
-            })?;
+        // A binding no portable rule reads is never observed, so it is not
+        // materialized at all. Otherwise project only the referenced columns:
+        // a column no rule names must not be able to fail the load. Columns
+        // absent from the relation are dropped here so the portable engine
+        // still reports them as missing fields rather than DuckDB failing the
+        // projection with a raw SQL error.
+        let Some(columns) = requested_columns.get(name) else {
+            relations.insert(name.to_owned(), Relation::empty(key_fields));
+            continue;
+        };
+        let projection: Vec<&str> = columns
+            .iter()
+            .filter(|column| loaded.column(column).is_some())
+            .map(String::as_str)
+            .collect();
+
+        let relation =
+            materialize_relation(connection, loaded.relation_name(), key_fields, &projection)
+                .map_err(|error| {
+                    VerifyReport::refusal(
+                        ExecutionMode::Batch,
+                        constraints.constraint_set_id.clone(),
+                        constraint_hash,
+                        RefusalCode::SqlError,
+                        format!("failed to materialize binding {name}: {error}"),
+                        json!({ "binding": name, "error": error.to_string() }),
+                    )
+                })?;
         relations.insert(name.to_owned(), relation);
     }
     Ok(relations)
@@ -537,23 +549,33 @@ fn materialize_relation(
     connection: &duckdb::Connection,
     relation_name: &str,
     key_fields: Vec<String>,
+    projection: &[&str],
 ) -> Result<Relation, String> {
-    let query = format!("SELECT * FROM {relation_name}");
+    // A rule may read a relation for its row count alone, with no column of
+    // its own. Counting keeps that row identity without converting any value.
+    if projection.is_empty() {
+        let row_count: u64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {relation_name}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = vec![BTreeMap::new(); usize::try_from(row_count).unwrap_or(usize::MAX)];
+        return Ok(Relation::new(key_fields, rows));
+    }
+
+    let column_names: Vec<String> = projection.iter().map(|name| (*name).to_owned()).collect();
+    let selected = projection
+        .iter()
+        .map(|name| quote_identifier(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!("SELECT {selected} FROM {relation_name}");
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| error.to_string())?;
     let mut duckdb_rows = statement.query([]).map_err(|error| error.to_string())?;
-
-    let column_count = duckdb_rows.as_ref().expect("rows ref").column_count();
-    let column_names: Vec<String> = (0..column_count)
-        .map(|i| {
-            duckdb_rows
-                .as_ref()
-                .expect("rows ref")
-                .column_name(i)
-                .map_or("?".to_owned(), |name| name.to_owned())
-        })
-        .collect();
 
     let mut rows = Vec::new();
     while let Some(row) = duckdb_rows.next().map_err(|error| error.to_string())? {

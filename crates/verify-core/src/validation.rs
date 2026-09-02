@@ -282,6 +282,105 @@ pub fn validate_predicate_key_fields(
     Ok(())
 }
 
+/// Whether a rule is evaluated by the portable engine over materialized rows.
+///
+/// Query rules and binding-qualified predicates stay inside the batch engine
+/// and never read a `Relation`. Both executors classify rules through this one
+/// function so the portable and batch-only lanes cannot drift apart.
+pub const fn routes_to_portable_engine(rule: &Rule) -> bool {
+    match &rule.check {
+        Check::QueryZeroRows { .. } => false,
+        Check::Predicate { .. } => matches!(rule.portability, Portability::Portable),
+        _ => true,
+    }
+}
+
+/// The columns each binding must materialize for portable rule evaluation.
+///
+/// Portable rules read only their declared columns, their predicate operand
+/// columns, and the binding's `key_fields` for failure localization. A binding
+/// absent from the result is never read by the portable engine; a binding
+/// present with an empty set is read for its row count alone. Columns no rule
+/// references are never observed, so an executor may project them away instead
+/// of materializing whole relations.
+pub fn portable_relation_columns(
+    constraints: &ConstraintSet,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for rule in constraints
+        .rules
+        .iter()
+        .filter(|rule| routes_to_portable_engine(rule))
+    {
+        match &rule.check {
+            Check::Unique {
+                binding,
+                columns: c,
+            }
+            | Check::NotNull {
+                binding,
+                columns: c,
+            } => {
+                columns
+                    .entry(binding.clone())
+                    .or_default()
+                    .extend(c.iter().cloned());
+            }
+            Check::Predicate { binding, expr } => {
+                let entry = columns.entry(binding.clone()).or_default();
+                for reference in analyze_predicate(binding, expr).references {
+                    entry.insert(reference.column);
+                }
+            }
+            Check::RowCount { binding, .. } => {
+                columns.entry(binding.clone()).or_default();
+            }
+            Check::AggregateCompare {
+                binding, aggregate, ..
+            } => {
+                let entry = columns.entry(binding.clone()).or_default();
+                for column in [
+                    aggregate.sum.as_ref(),
+                    aggregate.avg.as_ref(),
+                    aggregate.min.as_ref(),
+                    aggregate.max.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    entry.insert(column.clone());
+                }
+            }
+            Check::ForeignKey {
+                binding,
+                columns: c,
+                ref_binding,
+                ref_columns,
+            } => {
+                columns
+                    .entry(binding.clone())
+                    .or_default()
+                    .extend(c.iter().cloned());
+                columns
+                    .entry(ref_binding.clone())
+                    .or_default()
+                    .extend(ref_columns.iter().cloned());
+            }
+            Check::QueryZeroRows { .. } => {}
+        }
+    }
+
+    // Key fields localize every failure, so a read binding always carries them.
+    for binding in &constraints.bindings {
+        if let Some(entry) = columns.get_mut(&binding.name) {
+            entry.extend(binding.key_fields.iter().cloned());
+        }
+    }
+
+    columns
+}
+
 fn predicate_rule(rule: &Rule) -> Option<(&Rule, &str, &PredicateExpression)> {
     match &rule.check {
         Check::Predicate { binding, expr } => Some((rule, binding, expr)),
@@ -383,13 +482,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ConstraintValidationReason, analyze_predicate, validate_constraint_predicates,
-        validate_predicate_key_fields,
+        ConstraintValidationReason, analyze_predicate, portable_relation_columns,
+        routes_to_portable_engine, validate_constraint_predicates, validate_predicate_key_fields,
     };
     use crate::CONSTRAINT_VERSION;
     use crate::constraint::{
-        Binding, BindingKind, Check, ConstraintSet, Portability, PredicateExpression, Rule,
-        Severity,
+        Aggregate, Binding, BindingKind, Check, Comparison, ConstraintSet, Portability,
+        PredicateExpression, Rule, Severity,
     };
 
     fn expression(value: serde_json::Value) -> PredicateExpression {
@@ -589,5 +688,143 @@ mod tests {
         .expect_err("a missing anchor declaration should return an error, not panic");
         assert_eq!(error.reason, ConstraintValidationReason::MissingKeyFields);
         assert_eq!(error.detail["binding"], "current");
+    }
+
+    #[test]
+    fn portable_columns_cover_only_what_rules_read() {
+        let constraints = ConstraintSet {
+            version: CONSTRAINT_VERSION.to_owned(),
+            constraint_set_id: "tests.portable_columns".to_owned(),
+            bindings: vec![
+                binding("tape", &["loan_id"]),
+                binding("reference", &["ref_id"]),
+            ],
+            rules: vec![
+                Rule {
+                    id: "UNIQUE_LOAN".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::Portable,
+                    check: Check::Unique {
+                        binding: "tape".to_owned(),
+                        columns: vec!["loan_id".to_owned()],
+                    },
+                },
+                Rule {
+                    id: "BALANCE_POSITIVE".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::Portable,
+                    check: Check::Predicate {
+                        binding: "tape".to_owned(),
+                        expr: expression(json!({"gt": [{"column": "balance"}, 0]})),
+                    },
+                },
+                Rule {
+                    id: "TAPE_TOTAL".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::Portable,
+                    check: Check::AggregateCompare {
+                        binding: "tape".to_owned(),
+                        aggregate: Aggregate {
+                            sum: Some("balance".to_owned()),
+                            ..Aggregate::default()
+                        },
+                        compare: Comparison::default(),
+                    },
+                },
+                Rule {
+                    id: "TAPE_REFERENCES".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::Portable,
+                    check: Check::ForeignKey {
+                        binding: "tape".to_owned(),
+                        columns: vec!["ref_id".to_owned()],
+                        ref_binding: "reference".to_owned(),
+                        ref_columns: vec!["id".to_owned()],
+                    },
+                },
+            ],
+        };
+
+        let columns = portable_relation_columns(&constraints);
+
+        // Read columns plus the binding key fields that localize failures, and
+        // nothing else: an unreferenced column must never reach the executor.
+        assert_eq!(
+            columns["tape"].iter().cloned().collect::<Vec<_>>(),
+            vec!["balance", "loan_id", "ref_id"]
+        );
+        assert_eq!(
+            columns["reference"].iter().cloned().collect::<Vec<_>>(),
+            vec!["id", "ref_id"]
+        );
+    }
+
+    #[test]
+    fn batch_only_rules_contribute_no_materialized_columns() {
+        let constraints = ConstraintSet {
+            version: CONSTRAINT_VERSION.to_owned(),
+            constraint_set_id: "tests.batch_only_columns".to_owned(),
+            bindings: vec![
+                binding("current", &["loan_id"]),
+                binding("prior", &["loan_id"]),
+            ],
+            rules: vec![
+                Rule {
+                    id: "MATURITY_IMMUTABLE".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::BatchOnly,
+                    check: Check::Predicate {
+                        binding: "current".to_owned(),
+                        expr: expression(json!({
+                            "eq": [
+                                {"column": "maturity_date"},
+                                {"binding": "prior", "column": "maturity_date"}
+                            ]
+                        })),
+                    },
+                },
+                Rule {
+                    id: "NO_ORPHANS".to_owned(),
+                    severity: Severity::Error,
+                    portability: Portability::BatchOnly,
+                    check: Check::QueryZeroRows {
+                        bindings: vec!["current".to_owned()],
+                        query: "SELECT 1 WHERE 1 = 0".to_owned(),
+                    },
+                },
+            ],
+        };
+
+        // Both lanes classify through routes_to_portable_engine, so a batch-only
+        // run materializes nothing and cannot fail on a value DuckDB owns.
+        assert!(!constraints.rules.iter().any(routes_to_portable_engine));
+        assert!(portable_relation_columns(&constraints).is_empty());
+    }
+
+    #[test]
+    fn row_count_reads_a_relation_without_reading_a_column() {
+        let constraints = ConstraintSet {
+            version: CONSTRAINT_VERSION.to_owned(),
+            constraint_set_id: "tests.row_count_columns".to_owned(),
+            bindings: vec![Binding {
+                name: "tape".to_owned(),
+                kind: BindingKind::Relation,
+                key_fields: Vec::new(),
+            }],
+            rules: vec![Rule {
+                id: "TAPE_NOT_EMPTY".to_owned(),
+                severity: Severity::Error,
+                portability: Portability::Portable,
+                check: Check::RowCount {
+                    binding: "tape".to_owned(),
+                    compare: Comparison::default(),
+                },
+            }],
+        };
+
+        let columns = portable_relation_columns(&constraints);
+
+        // Present means "rows are read"; empty means "no column is converted".
+        assert!(columns["tape"].is_empty());
     }
 }

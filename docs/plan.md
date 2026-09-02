@@ -1218,6 +1218,10 @@ The spine batch executor:
 
 - binds named relations from on-disk files
 - verifies lock membership when requested
+- materializes only the columns portable rules read — their declared columns,
+  their predicate operand columns, and the binding's `key_fields` — so a column
+  no rule references can never fail the load, and a binding no portable rule
+  reads is not materialized at all
 - evaluates portable rules through `verify-engine`
 - evaluates binding-qualified batch-only predicates and `query_zero_rows`
   through the existing DuckDB batch context

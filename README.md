@@ -394,6 +394,8 @@ One primitive with two execution contexts:
 - reads bound inputs from disk (CSV, row-oriented JSON, JSONL, and Parquet)
 - evaluates portable and batch-only rules
 - loads every named relation once into one in-memory `BatchContext`
+- materializes only the columns portable rules read, so a column no rule
+  references cannot fail the load
 - evaluates binding-qualified predicates through deterministic keyed joins
 - can verify bound inputs against lockfiles
 - is the reference executor

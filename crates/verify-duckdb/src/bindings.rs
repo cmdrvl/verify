@@ -605,7 +605,9 @@ fn is_nested_type(data_type: &str) -> bool {
         || normalized.contains("[]")
 }
 
-pub(crate) fn quote_identifier(identifier: &str) -> String {
+/// Quotes a SQL identifier so arbitrary column and relation names are safe
+/// to interpolate into a generated query.
+pub fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 

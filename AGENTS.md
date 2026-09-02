@@ -127,7 +127,7 @@ repo direction is one `verify` primitive with two execution contexts.
 | `crates/verify-core/src/report.rs` | `verify.report.v1` types |
 | `crates/verify-core/src/refusal.rs` | refusal codes and detail schemas |
 | `crates/verify-core/src/order.rs` | canonical ordering helpers |
-| `crates/verify-core/src/validation.rs` | predicate analysis, portability, and key-contract validation |
+| `crates/verify-core/src/validation.rs` | predicate analysis, portability, key-contract validation, and portable-rule column requirements |
 | `crates/verify-engine/src/lib.rs` | portable and embedded execution surface |
 | `crates/verify-engine/src/portable_row.rs` | `unique`, `not_null`, `predicate` |
 | `crates/verify-engine/src/portable_relation.rs` | `row_count`, `aggregate_compare`, `foreign_key` |
@@ -253,7 +253,18 @@ Embedded execution must refuse both with explicit refusal semantics. Portable
 cross-binding lowering remains deferred; do not approximate it in
 `verify-engine`.
 
-### 5. Failure localization is first-class
+### 5. Materialization is narrow
+
+Batch materialization projects only what portable rules read: their declared
+columns, their predicate operand columns, and the binding's `key_fields`. A
+column no rule references must never be able to fail the load, and a binding no
+portable rule reads is not materialized at all.
+
+A column a rule *does* reference still fails closed. Narrowing what is
+materialized must never reintroduce a lossy cast for a value the protocol has
+no scalar for.
+
+### 6. Failure localization is first-class
 
 Failures must identify:
 
@@ -263,7 +274,7 @@ Failures must identify:
 
 Do not collapse failures into summary counts only.
 
-### 6. Determinism is mandatory
+### 7. Determinism is mandatory
 
 Same compiled constraint bytes plus same bound input bytes must yield the same
 ordered JSON report bytes.
@@ -274,7 +285,7 @@ That includes:
 - stable violation ordering
 - stable summary math
 
-### 7. Lock and witness boundaries stay clean
+### 8. Lock and witness boundaries stay clean
 
 - `lock` verifies trusted inputs
 - `witness` is a local receipt log only
@@ -282,7 +293,7 @@ That includes:
 Do not turn witness into portable evidence or try to make it authoritative over
 lock or pack.
 
-### 8. verify is not a scorer or policy engine
+### 9. verify is not a scorer or policy engine
 
 Do not implement:
 

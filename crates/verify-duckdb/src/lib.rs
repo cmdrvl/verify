@@ -15,7 +15,7 @@ pub use binding_predicates::{
 };
 pub use bindings::{
     BatchBindingError, BatchBindingInput, BatchBindingLimits, BindingColumn, BindingFormat,
-    BindingMetadata, BindingRegistry, LoadedBinding, SUPPORTED_EXTENSIONS,
+    BindingMetadata, BindingRegistry, LoadedBinding, SUPPORTED_EXTENSIONS, quote_identifier,
 };
 pub use lock_check::{LockError, verify_locks};
 pub use query_rules::{QueryRuleError, evaluate_query_rule, execute_query_rules};

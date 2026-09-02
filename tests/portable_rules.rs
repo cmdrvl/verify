@@ -216,3 +216,101 @@ fn compile_outputs_valid_constraint_json() {
     assert_eq!(compiled["version"], "verify.constraint.v1");
     assert!(compiled["rules"].as_array().is_some_and(|r| !r.is_empty()));
 }
+
+// ---------------------------------------------------------------------------
+// Materialization projects only the columns rules actually read
+// ---------------------------------------------------------------------------
+
+/// Regression for bd-1ka: a `DATE`/`TIMESTAMP` column no rule references must
+/// not abort the load. Before this, materialization converted every column of
+/// the relation into a protocol scalar, so an unread temporal column killed
+/// every single-binding constraint set over real tape data.
+#[test]
+fn unreferenced_temporal_columns_do_not_block_materialization() {
+    let constraints = fixture("fixtures/constraints/arity1/not_null_loans.verify.json");
+    let bind = format!(
+        "input={}",
+        fixture("fixtures/inputs/arity1/loans_with_temporal_columns.csv")
+    );
+    let output = verify_command()
+        .args([
+            "run",
+            &constraints,
+            "--bind",
+            &bind,
+            "--json",
+            "--no-witness",
+        ])
+        .output()
+        .expect("unreferenced temporal columns should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(report["outcome"], "PASS");
+    assert_eq!(report["refusal"], Value::Null);
+    assert_eq!(report["results"][0]["rule_id"], "INPUT_LOAN_ID_PRESENT");
+    assert_eq!(report["results"][0]["status"], "pass");
+}
+
+/// The complement of the case above: a temporal column a rule genuinely reads
+/// still refuses. Projection narrows what is materialized; it must not restore
+/// the lossy `Debug` cast that silently misrepresented dates before 0.4.0.
+#[test]
+fn referenced_temporal_columns_still_refuse() {
+    let authoring = concat!(
+        "constraint_set_id: tests.referenced_temporal\n",
+        "bindings:\n",
+        "  input:\n",
+        "    key_fields:\n",
+        "      - loan_id\n",
+        "rules:\n",
+        "  - id: ORIGINATION_DATE_PRESENT\n",
+        "    severity: error\n",
+        "    binding: input\n",
+        "    op: not_null\n",
+        "    columns:\n",
+        "      - origination_date\n",
+    );
+    let authoring_path = std::env::temp_dir().join("verify_referenced_temporal.yaml");
+    std::fs::write(&authoring_path, authoring).expect("authoring should write");
+
+    let compiled_path = std::env::temp_dir().join("verify_referenced_temporal.verify.json");
+    let compile = verify_command()
+        .args([
+            "compile",
+            &authoring_path.to_string_lossy(),
+            "--out",
+            &compiled_path.to_string_lossy(),
+        ])
+        .output()
+        .expect("compile should run");
+    assert_eq!(compile.status.code(), Some(0));
+
+    let bind = format!(
+        "input={}",
+        fixture("fixtures/inputs/arity1/loans_with_temporal_columns.csv")
+    );
+    let output = verify_command()
+        .args([
+            "run",
+            &compiled_path.to_string_lossy(),
+            "--bind",
+            &bind,
+            "--no-witness",
+        ])
+        .output()
+        .expect("referenced temporal column should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("origination_date"),
+        "refusal should name the referenced temporal column: {stderr}"
+    );
+}
