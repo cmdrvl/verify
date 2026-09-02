@@ -313,9 +313,11 @@ Batch-only execution cases:
 Binding-qualified predicates execute over the existing DuckDB `BatchContext`
 using positionally aligned, non-empty key tuples. Their stable runtime refusals
 are `E_FIELD_NOT_FOUND`, `E_KEY_INVALID`, `E_KEY_AMBIGUOUS`,
-`E_KEY_UNMATCHED`, and `E_BAD_EXPR`. This division is constitutional for the
-implementation. If a new rule does not fit either tier cleanly, stop and update
-the plan first.
+`E_KEY_UNMATCHED`, and `E_BAD_EXPR`. Same-family temporal column comparisons are
+batch-native; temporal key fields remain invalid because keys must be protocol
+scalars, and localized temporal failure values are report-only casts. This
+division is constitutional for the implementation. If a new rule does not fit
+either tier cleanly, stop and update the plan first.
 
 ---
 

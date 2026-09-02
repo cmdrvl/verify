@@ -1,4 +1,4 @@
-use duckdb::types::Value as DuckValue;
+use duckdb::types::{TimeUnit, Value as DuckValue};
 use serde_json::{Number, Value};
 use verify_engine::scalar::ScalarCategory;
 
@@ -34,6 +34,47 @@ impl std::fmt::Display for DuckValueError {
 }
 
 impl std::error::Error for DuckValueError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DuckScalarCategory {
+    Protocol(ScalarCategory),
+    Temporal(DuckTemporalKind),
+}
+
+impl DuckScalarCategory {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Protocol(category) => category.as_str(),
+            Self::Temporal(kind) => kind.as_str(),
+        }
+    }
+
+    pub(crate) const fn temporal_kind(self) -> Option<DuckTemporalKind> {
+        match self {
+            Self::Protocol(_) => None,
+            Self::Temporal(kind) => Some(kind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DuckTemporalKind {
+    Date,
+    Timestamp,
+    Time,
+    Interval,
+}
+
+impl DuckTemporalKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Date => "date",
+            Self::Timestamp => "timestamp",
+            Self::Time => "time",
+            Self::Interval => "interval",
+        }
+    }
+}
 
 /// Convert one dynamic DuckDB value to the exact JSON scalar consumed by the
 /// portable engine. Nested and engine-specific values fail closed.
@@ -74,6 +115,18 @@ pub fn duckdb_value_to_protocol(value: DuckValue) -> Result<Value, DuckValueErro
 /// Classify a DESCRIBE type without asking DuckDB to compare it. This is used
 /// to prove key and predicate operand compatibility before semantic execution.
 pub fn duckdb_type_category(data_type: &str) -> Result<ScalarCategory, DuckValueError> {
+    match duckdb_scalar_category(data_type)? {
+        DuckScalarCategory::Protocol(category) => Ok(category),
+        DuckScalarCategory::Temporal(kind) => Err(unrepresentable(kind.as_str())),
+    }
+}
+
+/// Classify DuckDB values for batch-only predicates. This keeps protocol
+/// scalar semantics distinct from temporal values that DuckDB may compare
+/// natively without widening `verify.report.v1` values.
+pub(crate) fn duckdb_scalar_category(
+    data_type: &str,
+) -> Result<DuckScalarCategory, DuckValueError> {
     let normalized = data_type.trim().to_ascii_uppercase();
     let base = normalized
         .split_once('(')
@@ -97,16 +150,28 @@ pub fn duckdb_type_category(data_type: &str) -> Result<ScalarCategory, DuckValue
             | "DOUBLE"
             | "DECIMAL"
     ) {
-        return Ok(ScalarCategory::Number);
+        return Ok(DuckScalarCategory::Protocol(ScalarCategory::Number));
     }
     if base == "BOOLEAN" || base == "BOOL" {
-        return Ok(ScalarCategory::Boolean);
+        return Ok(DuckScalarCategory::Protocol(ScalarCategory::Boolean));
     }
     if matches!(base, "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "ENUM") {
-        return Ok(ScalarCategory::String);
+        return Ok(DuckScalarCategory::Protocol(ScalarCategory::String));
     }
     if base == "NULL" {
-        return Ok(ScalarCategory::Null);
+        return Ok(DuckScalarCategory::Protocol(ScalarCategory::Null));
+    }
+    if base == "DATE" {
+        return Ok(DuckScalarCategory::Temporal(DuckTemporalKind::Date));
+    }
+    if normalized.starts_with("TIMESTAMP") || base == "TIMESTAMPTZ" {
+        return Ok(DuckScalarCategory::Temporal(DuckTemporalKind::Timestamp));
+    }
+    if normalized.starts_with("TIME") || base == "TIMETZ" {
+        return Ok(DuckScalarCategory::Temporal(DuckTemporalKind::Time));
+    }
+    if base == "INTERVAL" {
+        return Ok(DuckScalarCategory::Temporal(DuckTemporalKind::Interval));
     }
     if normalized.contains("STRUCT(")
         || normalized.contains("MAP(")
@@ -139,8 +204,52 @@ pub(crate) fn duckdb_value_sort_key(value: &DuckValue) -> String {
         DuckValue::Decimal(value) => format!("02:number:{value}"),
         DuckValue::Text(value) => format!("03:string:{value}"),
         DuckValue::Enum(value) => format!("03:string:{value}"),
-        other => format!("99:{other:?}"),
+        DuckValue::Date32(value) => format!("04:date:{}", signed_i128_sort_key(i128::from(*value))),
+        DuckValue::Timestamp(unit, value) => format!(
+            "05:timestamp:{}",
+            signed_i128_sort_key(i128::from(*value) * time_unit_nanos(*unit))
+        ),
+        DuckValue::Time64(unit, value) => format!(
+            "06:time:{}",
+            signed_i128_sort_key(i128::from(*value) * time_unit_nanos(*unit))
+        ),
+        DuckValue::Interval {
+            months,
+            days,
+            nanos,
+        } => format!(
+            "07:interval:{}:{}:{}",
+            signed_i128_sort_key(i128::from(*months)),
+            signed_i128_sort_key(i128::from(*days)),
+            signed_i128_sort_key(i128::from(*nanos))
+        ),
+        DuckValue::Blob(value) => {
+            let mut encoded = String::with_capacity(value.len() * 2);
+            for byte in value {
+                use std::fmt::Write as _;
+                let _ = write!(encoded, "{byte:02x}");
+            }
+            format!("08:blob:{encoded}")
+        }
+        DuckValue::List(_) => "90:list".to_owned(),
+        DuckValue::Struct(_) => "91:struct".to_owned(),
+        DuckValue::Array(_) => "92:array".to_owned(),
+        DuckValue::Map(_) => "93:map".to_owned(),
+        DuckValue::Union(_) => "94:union".to_owned(),
     }
+}
+
+const fn time_unit_nanos(unit: TimeUnit) -> i128 {
+    match unit {
+        TimeUnit::Second => 1_000_000_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Nanosecond => 1,
+    }
+}
+
+fn signed_i128_sort_key(value: i128) -> String {
+    format!("{:039}", (value as u128) ^ (1_u128 << 127))
 }
 
 fn huge_int_to_protocol(value: i128) -> Result<Value, DuckValueError> {
@@ -179,7 +288,10 @@ mod tests {
     use serde_json::{Value, json};
     use verify_engine::scalar::ScalarCategory;
 
-    use super::{DuckValueErrorKind, duckdb_type_category, duckdb_value_to_protocol};
+    use super::{
+        DuckScalarCategory, DuckTemporalKind, DuckValueErrorKind, duckdb_scalar_category,
+        duckdb_type_category, duckdb_value_sort_key, duckdb_value_to_protocol,
+    };
 
     #[test]
     fn converts_every_protocol_scalar_family_without_coercion() {
@@ -250,6 +362,59 @@ mod tests {
                 .expect_err("date should fail")
                 .kind,
             DuckValueErrorKind::Unrepresentable
+        );
+    }
+
+    #[test]
+    fn temporal_type_classification_is_available_to_duckdb_predicates_only() {
+        for (data_type, expected) in [
+            ("DATE", DuckTemporalKind::Date),
+            ("TIMESTAMP", DuckTemporalKind::Timestamp),
+            ("TIMESTAMP WITH TIME ZONE", DuckTemporalKind::Timestamp),
+            ("TIME", DuckTemporalKind::Time),
+            ("INTERVAL", DuckTemporalKind::Interval),
+        ] {
+            assert_eq!(
+                duckdb_scalar_category(data_type).expect("temporal type should classify"),
+                DuckScalarCategory::Temporal(expected)
+            );
+            assert_eq!(
+                duckdb_type_category(data_type)
+                    .expect_err("protocol category should still refuse temporal types")
+                    .kind,
+                DuckValueErrorKind::Unrepresentable
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_sort_keys_are_chronological_not_debug_lexical() {
+        let earlier = DuckValue::Date32(2);
+        let later = DuckValue::Date32(10);
+        assert!(
+            format!("{later:?}") < format!("{earlier:?}"),
+            "the planted pair must prove Debug lexical order disagrees with chronology"
+        );
+        assert!(duckdb_value_sort_key(&earlier) < duckdb_value_sort_key(&later));
+
+        assert!(
+            duckdb_value_sort_key(&DuckValue::Timestamp(TimeUnit::Millisecond, 2))
+                < duckdb_value_sort_key(&DuckValue::Timestamp(TimeUnit::Second, 1))
+        );
+        assert!(
+            duckdb_value_sort_key(&DuckValue::Time64(TimeUnit::Microsecond, 999))
+                < duckdb_value_sort_key(&DuckValue::Time64(TimeUnit::Millisecond, 1))
+        );
+        assert!(
+            duckdb_value_sort_key(&DuckValue::Interval {
+                months: 0,
+                days: 1,
+                nanos: 0,
+            }) < duckdb_value_sort_key(&DuckValue::Interval {
+                months: 0,
+                days: 2,
+                nanos: 0,
+            })
         );
     }
 }

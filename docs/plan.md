@@ -661,6 +661,10 @@ of every participating relation:
 - every declared key field must exist, otherwise `E_FIELD_NOT_FOUND`
 - every key component must be a non-null protocol scalar; a null, array, object,
   or unrepresentable component refuses with `E_KEY_INVALID`
+- temporal key components (`date`, `timestamp`, `time`, `interval`) remain
+  unrepresentable for key identity and refuse with `E_KEY_INVALID`; the batch
+  temporal comparison exception below does not apply to keys because joining,
+  dedupe, and report localization require protocol `Value` keys
 - corresponding components compare with the same type-strict scalar equality
   contract as predicate `eq`; incompatible component categories refuse with
   `E_KEY_INVALID`, and no string/number/boolean coercion is permitted
@@ -686,7 +690,8 @@ emitted. A missing referenced field refuses with `E_FIELD_NOT_FOUND`, including
 the referenced binding and field in the detail.
 
 The DuckDB lane must reuse the protocol scalar categories and comparison
-semantics defined above. In particular:
+semantics defined above for every protocol-representable operand. In
+particular:
 
 - DuckDB implicit casts are never allowed to decide a predicate verdict
 - the DuckDB-to-protocol scalar classification is shared with the existing
@@ -696,7 +701,19 @@ semantics defined above. In particular:
   string families remain distinct
 - null equality, null ordering, heterogeneous membership, and full-branch
   comparability behave exactly as they do for portable predicates
-- a DuckDB type that cannot be represented as a declared protocol scalar
+- same-family temporal column-to-column comparisons (`date`, `timestamp`,
+  `time`, `interval`) may evaluate `eq`, `ne`, `gt`, `gte`, `lt`, and `lte`
+  inside DuckDB without first representing the operands as protocol `Value`s;
+  this exception applies only after explicit type checks prove both operands are
+  columns in the same temporal family
+- temporal equality uses the protocol null contract: null equals null, and null
+  differs from a present temporal value; ordered comparisons involving null
+  still refuse with `E_BAD_EXPR`
+- when a failed temporal comparison localizes to one anchor column, the affected
+  value is rendered only for the report by an explicit DuckDB `CAST(... AS
+  VARCHAR)`; that rendered string is not used for predicate truth
+- any DuckDB type that cannot be represented as a declared protocol scalar and
+  is not admitted by the same-family temporal column comparison exception
   refuses rather than being compared through engine-specific behavior
 
 An incomparable expression refuses with `E_BAD_EXPR`. Its detail preserves the
@@ -722,9 +739,11 @@ bound or rendered through one canonical literal encoder. Generated SQL remains
 an implementation detail and never becomes authoring or report evidence.
 
 Lowering must preserve AST order for diagnostics but may share repeated joins
-and projections. It must perform protocol type checks explicitly before issuing
-semantic comparisons, so a direct DuckDB comparison with implicit coercion is
-not an acceptable implementation.
+and projections. It must perform type checks explicitly before issuing semantic
+comparisons. Direct DuckDB comparison is allowed only for the same-family
+temporal column-to-column exception above; DuckDB implicit coercion across
+protocol scalar categories or temporal families is not an acceptable
+implementation.
 
 Each distinct non-anchor binding is joined to the anchor once per rule through
 the positionally aligned key tuple. The executor must not issue one query per
@@ -1342,12 +1361,15 @@ A self-consistent answer can still be wrong.
   binding-qualified predicate declares a non-empty, unique key tuple of the same
   arity, aligned positionally.
 - `I21` Key-identity invariant: participating key tuples contain non-null,
-  type-compatible protocol scalars and are unique within each relation.
+  type-compatible protocol scalars and are unique within each relation;
+  temporal key components are refused as unrepresentable key identity.
 - `I22` Anchor-domain invariant: binding-qualified predicates evaluate exactly
   the anchor rows; non-anchor-only rows are outside the invocation, while a
   missing anchor counterpart refuses.
-- `I23` Comparison invariant: DuckDB coercion, collation, and scan order cannot
-  change predicate meaning, refusal choice, or output order.
+- `I23` Comparison invariant: DuckDB coercion, collation, debug formatting, and
+  scan order cannot change predicate meaning, refusal choice, or output order;
+  temporal sort keys are explicit and chronological rather than derived from
+  third-party debug representations.
 - `I24` Cross-binding localization invariant: each false predicate produces one
   affected anchor row, with field/value included only when localization to one
   anchor column is unambiguous.

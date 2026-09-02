@@ -306,6 +306,13 @@ Structural and scalar defects use stable refusal codes:
 - `E_KEY_UNMATCHED` for an anchor key without a counterpart
 - `E_BAD_EXPR` for incomparable predicate operands
 
+Same-family temporal column-to-column predicates over `date`, `timestamp`,
+`time`, and `interval` values use DuckDB-native comparison after explicit type
+checks, without widening `verify.report.v1` values. Temporal fields remain
+invalid as `key_fields` because join identity and localization keys must be
+protocol scalars. A failing temporal predicate renders an unambiguous anchor
+field value through an explicit report-only cast.
+
 SQL authoring compiles into batch-only rules. Embedded execution refuses
 all batch-only rules with `E_BATCH_ONLY_RULE`; it does not approximate
 binding-qualified predicates. Portable cross-binding lowering is deferred.

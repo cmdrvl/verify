@@ -44,6 +44,12 @@ impl TempScenario {
         .expect("constraint should be written");
         path
     }
+
+    fn write_text(&self, name: &str, value: &str) -> PathBuf {
+        let path = self.root.join(name);
+        fs::write(&path, value).expect("fixture should be written");
+        path
+    }
 }
 
 impl Drop for TempScenario {
@@ -280,6 +286,48 @@ fn invalid_duplicate_and_unmatched_keys_have_stable_runtime_refusals() {
         json!({ "loan_id": "LN-100", "tranche_id": "A" })
     );
     assert_eq!(unmatched["refusal"]["detail"]["missing_binding"], "prior");
+}
+
+#[test]
+fn temporal_key_fields_are_refused_end_to_end() {
+    let scenario = TempScenario::new("temporal-key");
+    let constraint = json!({
+        "version": "verify.constraint.v1",
+        "constraint_set_id": "integration.binding_qualified.temporal_key_refusal",
+        "bindings": [
+            { "name": "current", "kind": "relation", "key_fields": ["ASSETDATE"] },
+            { "name": "prior", "kind": "relation", "key_fields": ["ASSETDATE"] }
+        ],
+        "rules": [{
+            "id": "TEMPORAL_KEY_REFUSAL",
+            "severity": "error",
+            "portability": "batch_only",
+            "check": {
+                "op": "predicate",
+                "binding": "current",
+                "expr": {
+                    "eq": [
+                        { "binding": "current", "column": "amount" },
+                        { "binding": "prior", "column": "amount" }
+                    ]
+                }
+            }
+        }]
+    });
+    let compiled = scenario.write_constraint("temporal-key.verify.json", &constraint);
+    let current = scenario.write_text("current.csv", "ASSETDATE,amount\n2026-01-02,100\n");
+    let prior = scenario.write_text("prior.csv", "ASSETDATE,amount\n2026-01-02,100\n");
+    let report = refusal(
+        run_json(&compiled, &[("current", current), ("prior", prior)]),
+        "E_KEY_INVALID",
+    );
+
+    assert_eq!(
+        report["refusal"]["detail"]["reason"],
+        "unrepresentable_component"
+    );
+    assert_eq!(report["refusal"]["detail"]["value_type"], "date");
+    assert_eq!(report["refusal"]["detail"]["field"], "ASSETDATE");
 }
 
 #[test]

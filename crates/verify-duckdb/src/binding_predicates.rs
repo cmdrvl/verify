@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use duckdb::{Connection, types::Value as DuckValue};
+use duckdb::{Connection, params_from_iter, types::Value as DuckValue};
 use serde_json::{Map, Value, json};
 use verify_core::{
     CONSTRAINT_VERSION,
@@ -24,7 +24,8 @@ use crate::{
     BindingRegistry,
     bindings::quote_identifier,
     scalar::{
-        DuckValueError, duckdb_type_category, duckdb_value_sort_key, duckdb_value_to_protocol,
+        DuckScalarCategory, DuckTemporalKind, DuckValueError, DuckValueErrorKind,
+        duckdb_scalar_category, duckdb_value_sort_key, duckdb_value_to_protocol,
     },
 };
 
@@ -226,16 +227,28 @@ pub fn evaluate_rule(
         .map(|row| &row.key);
     preflight_expression(rule, expression, anchor_binding, &fields, first_anchor_key)?;
 
-    let plan = build_join_query(rule, &analysis, &fields, &keys, bindings)?;
+    let plan = build_join_query(rule, expression, &analysis, &fields, &keys, bindings)?;
     let rows = load_joined_rows(rule, &plan, connection)?;
     let mut affected = Vec::new();
     for row in rows {
-        let values = row.protocol_values(rule, anchor_binding)?;
-        if !evaluate_expression(rule, expression, anchor_binding, &row.key, &values)? {
+        if !evaluate_expression(rule, expression, anchor_binding, &row)? {
             let localized = localized_anchor_column(expression, anchor_binding);
-            let (field, value) = localized.map_or((None, None), |column| {
-                (Some(column.field.clone()), values.get(&column).cloned())
-            });
+            let (field, value) = match localized {
+                Some(column) => {
+                    let value = localized_affected_value(
+                        rule,
+                        connection,
+                        bindings,
+                        &keys,
+                        &fields,
+                        anchor_binding,
+                        &row,
+                        &column,
+                    )?;
+                    (Some(column.field.clone()), value)
+                }
+                None => (None, None),
+            };
             affected.push(AffectedEntry {
                 binding: anchor_binding.to_owned(),
                 key: Some(row.key),
@@ -305,7 +318,7 @@ impl ColumnId {
 
 #[derive(Debug, Clone)]
 struct FieldInfo {
-    category: Result<ScalarCategory, DuckValueError>,
+    category: Result<DuckScalarCategory, DuckValueError>,
 }
 
 type FieldCatalog = BTreeMap<ColumnId, FieldInfo>;
@@ -345,7 +358,7 @@ fn preflight_fields(
         catalog.insert(
             column,
             FieldInfo {
-                category: duckdb_type_category(&described.data_type),
+                category: duckdb_scalar_category(&described.data_type),
             },
         );
     }
@@ -449,7 +462,26 @@ fn validate_keys(
                     field: field.clone(),
                 })?;
             match &info.category {
-                Ok(category) => categories.push(*category),
+                Ok(DuckScalarCategory::Protocol(category)) => categories.push(*category),
+                Ok(DuckScalarCategory::Temporal(kind)) => {
+                    issues.push(KeyIssue {
+                        binding: binding_name.clone(),
+                        sort_key: format!("metadata:{position:08}:{field}"),
+                        rank: 0,
+                        error: key_invalid(
+                            rule,
+                            json!({
+                                "rule_id": rule.id,
+                                "binding": binding_name,
+                                "key_fields": key_fields,
+                                "field": field,
+                                "value_type": kind.as_str(),
+                                "reason": DuckValueErrorKind::Unrepresentable.key_reason(),
+                            }),
+                        ),
+                    });
+                    categories.push(ScalarCategory::Null);
+                }
                 Err(error) => {
                     issues.push(KeyIssue {
                         binding: binding_name.clone(),
@@ -740,15 +772,31 @@ fn validate_counterparts(
 #[derive(Debug, Clone)]
 struct QueryPlan {
     // DuckDB lowers the AST's resolved column surface into one keyed joined
-    // projection. Predicate truth remains in verify-engine::scalar so DuckDB
-    // casts, null logic, and collation never decide a verdict.
+    // projection. Protocol scalar predicate truth remains in
+    // verify-engine::scalar; temporal column-to-column comparisons use native
+    // DuckDB boolean projections so temporals need not become report Values.
     sql: String,
     anchor_key_fields: Vec<String>,
     projections: Vec<ColumnId>,
+    native_comparisons: Vec<NativeComparison>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeComparison {
+    key: NativeComparisonKey,
+    temporal_kind: DuckTemporalKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NativeComparisonKey {
+    operator: String,
+    left: ColumnId,
+    right: ColumnId,
 }
 
 fn build_join_query(
     rule: &Rule,
+    expression: &PredicateExpression,
     analysis: &PredicateAnalysis,
     fields: &FieldCatalog,
     keys: &KeyRegistry,
@@ -778,6 +826,8 @@ fn build_join_query(
         .map(|reference| ColumnId::new(&reference.binding, &reference.column))
         .filter(|column| seen_projections.insert(column.clone()))
         .collect::<Vec<_>>();
+    let native_comparisons =
+        collect_native_comparisons(expression, &analysis.anchor_binding, fields);
     let mut select = anchor_keys
         .fields
         .iter()
@@ -800,6 +850,23 @@ fn build_join_query(
             quote_identifier(alias),
             quote_identifier(&column.field),
             quote_identifier(&format!("__verify_col_{index}"))
+        ));
+    }
+    for (index, comparison) in native_comparisons.iter().enumerate() {
+        let left = comparison_column_sql(&comparison.key.left, &aliases, rule)?;
+        let right = comparison_column_sql(&comparison.key.right, &aliases, rule)?;
+        let result = native_comparison_sql(&comparison.key.operator, &left, &right);
+        select.push(format!(
+            "{result} AS {}",
+            quote_identifier(&format!("__verify_cmp_{index}"))
+        ));
+        select.push(format!(
+            "({left} IS NULL) AS {}",
+            quote_identifier(&format!("__verify_cmp_{index}_left_null"))
+        ));
+        select.push(format!(
+            "({right} IS NULL) AS {}",
+            quote_identifier(&format!("__verify_cmp_{index}_right_null"))
         ));
     }
 
@@ -858,7 +925,136 @@ fn build_join_query(
         sql,
         anchor_key_fields: anchor_keys.fields.clone(),
         projections,
+        native_comparisons,
     })
+}
+
+fn collect_native_comparisons(
+    expression: &PredicateExpression,
+    anchor_binding: &str,
+    fields: &FieldCatalog,
+) -> Vec<NativeComparison> {
+    let mut comparisons = BTreeMap::new();
+    collect_native_comparisons_inner(expression, anchor_binding, fields, &mut comparisons);
+    comparisons
+        .into_iter()
+        .map(|(key, temporal_kind)| NativeComparison { key, temporal_kind })
+        .collect()
+}
+
+fn collect_native_comparisons_inner(
+    expression: &PredicateExpression,
+    anchor_binding: &str,
+    fields: &FieldCatalog,
+    comparisons: &mut BTreeMap<NativeComparisonKey, DuckTemporalKind>,
+) {
+    match expression {
+        PredicateExpression::Eq { eq } => {
+            collect_native_comparison("eq", eq, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Ne { ne } => {
+            collect_native_comparison("ne", ne, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Gt { gt } => {
+            collect_native_comparison("gt", gt, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Gte { gte } => {
+            collect_native_comparison("gte", gte, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Lt { lt } => {
+            collect_native_comparison("lt", lt, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Lte { lte } => {
+            collect_native_comparison("lte", lte, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::And { and } | PredicateExpression::Or { or: and } => {
+            for expression in and {
+                collect_native_comparisons_inner(expression, anchor_binding, fields, comparisons);
+            }
+        }
+        PredicateExpression::Not { not } => {
+            collect_native_comparisons_inner(not, anchor_binding, fields, comparisons);
+        }
+        PredicateExpression::Column(_)
+        | PredicateExpression::In { .. }
+        | PredicateExpression::IsNull { .. }
+        | PredicateExpression::IsBlank { .. } => {}
+    }
+}
+
+fn collect_native_comparison(
+    operator: &str,
+    operands: &[PredicateOperand; 2],
+    anchor_binding: &str,
+    fields: &FieldCatalog,
+    comparisons: &mut BTreeMap<NativeComparisonKey, DuckTemporalKind>,
+) {
+    let Some(left) = operand_column_id(&operands[0], anchor_binding) else {
+        return;
+    };
+    let Some(right) = operand_column_id(&operands[1], anchor_binding) else {
+        return;
+    };
+    let Some(left_kind) = field_temporal_kind(fields, &left) else {
+        return;
+    };
+    let Some(right_kind) = field_temporal_kind(fields, &right) else {
+        return;
+    };
+    if left_kind != right_kind {
+        return;
+    }
+    comparisons.insert(
+        NativeComparisonKey {
+            operator: operator.to_owned(),
+            left,
+            right,
+        },
+        left_kind,
+    );
+}
+
+fn operand_column_id(operand: &PredicateOperand, anchor_binding: &str) -> Option<ColumnId> {
+    match operand {
+        PredicateOperand::Column(column) => Some(resolved_column_id(column, anchor_binding)),
+        PredicateOperand::Literal(_) => None,
+    }
+}
+
+fn field_temporal_kind(fields: &FieldCatalog, column: &ColumnId) -> Option<DuckTemporalKind> {
+    fields
+        .get(column)
+        .and_then(|info| info.category.as_ref().ok())
+        .and_then(|category| category.temporal_kind())
+}
+
+fn comparison_column_sql(
+    column: &ColumnId,
+    aliases: &BTreeMap<String, String>,
+    rule: &Rule,
+) -> Result<String, BindingPredicateError> {
+    let alias = aliases
+        .get(&column.binding)
+        .ok_or_else(|| missing_binding(rule, &column.binding))?;
+    Ok(qualified_identifier(alias, &column.field))
+}
+
+fn native_comparison_sql(operator: &str, left: &str, right: &str) -> String {
+    match operator {
+        "eq" => format!("({left} IS NOT DISTINCT FROM {right})"),
+        "ne" => format!("({left} IS DISTINCT FROM {right})"),
+        "gt" => native_ordering_sql(left, right, ">"),
+        "gte" => native_ordering_sql(left, right, ">="),
+        "lt" => native_ordering_sql(left, right, "<"),
+        "lte" => native_ordering_sql(left, right, "<="),
+        _ => unreachable!("native comparison operator is collected from known predicate variants"),
+    }
+}
+
+fn native_ordering_sql(left: &str, right: &str, operator: &str) -> String {
+    format!(
+        "CASE WHEN {left} IS NULL OR {right} IS NULL THEN NULL ELSE ({left} {operator} {right}) END"
+    )
 }
 
 fn qualified_identifier(alias: &str, field: &str) -> String {
@@ -869,38 +1065,44 @@ fn qualified_identifier(alias: &str, field: &str) -> String {
 struct JoinedRow {
     tuple: KeyTuple,
     key: BTreeMap<String, Value>,
-    values: Vec<(ColumnId, Result<Value, DuckValueError>)>,
+    values: BTreeMap<ColumnId, Result<Value, DuckValueError>>,
+    native_comparisons: BTreeMap<NativeComparisonKey, NativeComparisonValue>,
+}
+
+#[derive(Debug)]
+struct NativeComparisonValue {
+    result: Option<bool>,
+    left_is_null: bool,
+    right_is_null: bool,
+    temporal_kind: DuckTemporalKind,
 }
 
 impl JoinedRow {
-    fn protocol_values(
+    fn protocol_value(
         &self,
         rule: &Rule,
         anchor_binding: &str,
-    ) -> Result<BTreeMap<ColumnId, Value>, BindingPredicateError> {
-        let mut values = BTreeMap::new();
-        for (column, value) in &self.values {
-            match value {
-                Ok(value) => {
-                    values.insert(column.clone(), value.clone());
-                }
-                Err(error) => {
-                    return Err(BindingPredicateError::BadExpression {
-                        rule_id: rule.id.clone(),
-                        detail: json!({
-                            "rule_id": rule.id,
-                            "reason": "unrepresentable_operand",
-                            "binding": anchor_binding,
-                            "key": self.key,
-                            "operand_binding": column.binding,
-                            "field": column.field,
-                            "value_type": error.value_type,
-                        }),
-                    });
-                }
-            }
+        column: &ColumnId,
+    ) -> Result<&Value, BindingPredicateError> {
+        let value = self
+            .values
+            .get(column)
+            .ok_or_else(|| missing_projected_column(rule, column))?;
+        match value {
+            Ok(value) => Ok(value),
+            Err(error) => Err(BindingPredicateError::BadExpression {
+                rule_id: rule.id.clone(),
+                detail: json!({
+                    "rule_id": rule.id,
+                    "reason": "unrepresentable_operand",
+                    "binding": anchor_binding,
+                    "key": self.key,
+                    "operand_binding": column.binding,
+                    "field": column.field,
+                    "value_type": error.value_type,
+                }),
+            }),
         }
-        Ok(values)
     }
 }
 
@@ -949,26 +1151,237 @@ fn load_joined_rows(
             key.insert(field.clone(), value);
         }
 
-        let mut values = Vec::with_capacity(plan.projections.len());
+        let mut values = BTreeMap::new();
         for (offset, column) in plan.projections.iter().enumerate() {
             let raw: DuckValue = row
                 .get(plan.anchor_key_fields.len() + offset)
                 .map_err(|error| sql_error(rule, error))?;
-            values.push((column.clone(), duckdb_value_to_protocol(raw)));
+            values.insert(column.clone(), duckdb_value_to_protocol(raw));
+        }
+        let native_offset = plan.anchor_key_fields.len() + plan.projections.len();
+        let mut native_comparisons = BTreeMap::new();
+        for (index, comparison) in plan.native_comparisons.iter().enumerate() {
+            let result_index = native_offset + index * 3;
+            let raw_result: DuckValue = row
+                .get(result_index)
+                .map_err(|error| sql_error(rule, error))?;
+            let raw_left_null: DuckValue = row
+                .get(result_index + 1)
+                .map_err(|error| sql_error(rule, error))?;
+            let raw_right_null: DuckValue = row
+                .get(result_index + 2)
+                .map_err(|error| sql_error(rule, error))?;
+            native_comparisons.insert(
+                comparison.key.clone(),
+                NativeComparisonValue {
+                    result: optional_bool_projection(rule, &comparison.key, raw_result)?,
+                    left_is_null: bool_projection(rule, &comparison.key, raw_left_null)?,
+                    right_is_null: bool_projection(rule, &comparison.key, raw_right_null)?,
+                    temporal_kind: comparison.temporal_kind,
+                },
+            );
         }
         rows.push(JoinedRow {
             tuple: KeyTuple(tuple),
             key,
             values,
+            native_comparisons,
         });
     }
     rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
     Ok(rows)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn localized_affected_value(
+    rule: &Rule,
+    connection: &Connection,
+    bindings: &BindingRegistry,
+    keys: &KeyRegistry,
+    fields: &FieldCatalog,
+    anchor_binding: &str,
+    row: &JoinedRow,
+    column: &ColumnId,
+) -> Result<Option<Value>, BindingPredicateError> {
+    if let Ok(value) = row.protocol_value(rule, anchor_binding, column) {
+        return Ok(Some(value.clone()));
+    }
+    if field_temporal_kind(fields, column).is_none() {
+        return Ok(None);
+    }
+    render_temporal_anchor_value(
+        rule,
+        connection,
+        bindings,
+        keys,
+        anchor_binding,
+        row,
+        column,
+    )
+    .map(Some)
+}
+
+fn render_temporal_anchor_value(
+    rule: &Rule,
+    connection: &Connection,
+    bindings: &BindingRegistry,
+    keys: &KeyRegistry,
+    anchor_binding: &str,
+    row: &JoinedRow,
+    column: &ColumnId,
+) -> Result<Value, BindingPredicateError> {
+    let loaded = bindings
+        .get(anchor_binding)
+        .ok_or_else(|| missing_binding(rule, anchor_binding))?;
+    let anchor_keys = keys
+        .get(anchor_binding)
+        .ok_or_else(|| missing_binding(rule, anchor_binding))?;
+    let mut conditions = Vec::with_capacity(anchor_keys.fields.len());
+    let mut params = Vec::with_capacity(anchor_keys.fields.len());
+    for (field, part) in anchor_keys.fields.iter().zip(&row.tuple.0) {
+        let quoted = quote_identifier(field);
+        match part {
+            KeyPart::Boolean(value) => {
+                conditions.push(format!("{quoted} = ?"));
+                params.push(DuckValue::Boolean(*value));
+            }
+            KeyPart::Number(value) => {
+                conditions.push(format!("CAST({quoted} AS DOUBLE) = ?"));
+                params.push(DuckValue::Double(normalized_number(*value)));
+            }
+            KeyPart::String(value) => {
+                conditions.push(format!("encode({quoted}) = encode(?)"));
+                params.push(DuckValue::Text(value.clone()));
+            }
+        }
+    }
+    let sql = format!(
+        "SELECT CAST({} AS VARCHAR) FROM {} WHERE {} LIMIT 1",
+        quote_identifier(&column.field),
+        quote_identifier(loaded.relation_name()),
+        conditions.join(" AND ")
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| sql_error(rule, error))?;
+    let mut query = statement
+        .query(params_from_iter(params.iter()))
+        .map_err(|error| sql_error(rule, error))?;
+    let row = query
+        .next()
+        .map_err(|error| sql_error(rule, error))?
+        .ok_or_else(|| {
+            key_invalid(
+                rule,
+                json!({
+                    "rule_id": rule.id,
+                    "binding": anchor_binding,
+                    "key": row.key,
+                    "reason": "missing_anchor_key_for_temporal_render",
+                }),
+            )
+        })?;
+    let raw: DuckValue = row.get(0).map_err(|error| sql_error(rule, error))?;
+    temporal_render_value(rule, column, raw)
+}
+
+fn temporal_render_value(
+    rule: &Rule,
+    column: &ColumnId,
+    value: DuckValue,
+) -> Result<Value, BindingPredicateError> {
+    match value {
+        DuckValue::Null => Ok(Value::Null),
+        DuckValue::Text(value) | DuckValue::Enum(value) => Ok(Value::String(value)),
+        other => Err(BindingPredicateError::BadExpression {
+            rule_id: rule.id.clone(),
+            detail: json!({
+                "rule_id": rule.id,
+                "reason": "unexpected_temporal_render_type",
+                "binding": column.binding,
+                "field": column.field,
+                "value_type": duckdb_value_type_name(&other),
+            }),
+        }),
+    }
+}
+
+fn optional_bool_projection(
+    rule: &Rule,
+    comparison: &NativeComparisonKey,
+    value: DuckValue,
+) -> Result<Option<bool>, BindingPredicateError> {
+    match value {
+        DuckValue::Null => Ok(None),
+        DuckValue::Boolean(value) => Ok(Some(value)),
+        other => Err(unexpected_native_projection(rule, comparison, other)),
+    }
+}
+
+fn bool_projection(
+    rule: &Rule,
+    comparison: &NativeComparisonKey,
+    value: DuckValue,
+) -> Result<bool, BindingPredicateError> {
+    match value {
+        DuckValue::Boolean(value) => Ok(value),
+        other => Err(unexpected_native_projection(rule, comparison, other)),
+    }
+}
+
+fn unexpected_native_projection(
+    rule: &Rule,
+    comparison: &NativeComparisonKey,
+    value: DuckValue,
+) -> BindingPredicateError {
+    BindingPredicateError::BadExpression {
+        rule_id: rule.id.clone(),
+        detail: json!({
+            "rule_id": rule.id,
+            "reason": "unexpected_native_projection_type",
+            "operator": comparison.operator,
+            "left_binding": comparison.left.binding,
+            "left_field": comparison.left.field,
+            "right_binding": comparison.right.binding,
+            "right_field": comparison.right.field,
+            "value_type": duckdb_value_type_name(&value),
+        }),
+    }
+}
+
+fn duckdb_value_type_name(value: &DuckValue) -> &'static str {
+    match value {
+        DuckValue::Null => "null",
+        DuckValue::Boolean(_) => "boolean",
+        DuckValue::TinyInt(_)
+        | DuckValue::SmallInt(_)
+        | DuckValue::Int(_)
+        | DuckValue::BigInt(_)
+        | DuckValue::HugeInt(_)
+        | DuckValue::UTinyInt(_)
+        | DuckValue::USmallInt(_)
+        | DuckValue::UInt(_)
+        | DuckValue::UBigInt(_)
+        | DuckValue::Float(_)
+        | DuckValue::Double(_)
+        | DuckValue::Decimal(_) => "number",
+        DuckValue::Text(_) | DuckValue::Enum(_) => "string",
+        DuckValue::Timestamp(..) => "timestamp",
+        DuckValue::Blob(_) => "blob",
+        DuckValue::Date32(_) => "date",
+        DuckValue::Time64(..) => "time",
+        DuckValue::Interval { .. } => "interval",
+        DuckValue::List(_) => "list",
+        DuckValue::Struct(_) => "struct",
+        DuckValue::Array(_) => "array",
+        DuckValue::Map(_) => "map",
+        DuckValue::Union(_) => "union",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OperandDescriptor {
-    category: ScalarCategory,
+    category: DuckScalarCategory,
     column: Option<ColumnId>,
 }
 
@@ -981,7 +1394,7 @@ fn preflight_expression(
 ) -> Result<(), BindingPredicateError> {
     match expression {
         PredicateExpression::Column(column) => {
-            column_descriptor(rule, column, anchor_binding, fields, key).map(|_| ())
+            column_descriptor(rule, column, anchor_binding, fields, key, false).map(|_| ())
         }
         PredicateExpression::Eq { eq } | PredicateExpression::Ne { ne: eq } => {
             let operator = if matches!(expression, PredicateExpression::Eq { .. }) {
@@ -989,8 +1402,8 @@ fn preflight_expression(
             } else {
                 "ne"
             };
-            let left = operand_descriptor(rule, &eq[0], anchor_binding, fields, key)?;
-            let right = operand_descriptor(rule, &eq[1], anchor_binding, fields, key)?;
+            let left = operand_descriptor(rule, &eq[0], anchor_binding, fields, key, true)?;
+            let right = operand_descriptor(rule, &eq[1], anchor_binding, fields, key, true)?;
             if equality_categories_are_compatible(left.category, right.category) {
                 Ok(())
             } else {
@@ -1035,7 +1448,7 @@ fn preflight_expression(
             };
             for member in set {
                 let right = OperandDescriptor {
-                    category: value_category(member),
+                    category: DuckScalarCategory::Protocol(value_category(member)),
                     column: None,
                 };
                 if !equality_categories_are_compatible(left.category, right.category) {
@@ -1053,7 +1466,7 @@ fn preflight_expression(
         }
         PredicateExpression::IsNull { is_null: column }
         | PredicateExpression::IsBlank { is_blank: column } => {
-            column_descriptor(rule, column, anchor_binding, fields, key).map(|_| ())
+            column_descriptor(rule, column, anchor_binding, fields, key, false).map(|_| ())
         }
     }
 }
@@ -1066,8 +1479,8 @@ fn preflight_ordering(
     fields: &FieldCatalog,
     key: Option<&BTreeMap<String, Value>>,
 ) -> Result<(), BindingPredicateError> {
-    let left = operand_descriptor(rule, &operands[0], anchor_binding, fields, key)?;
-    let right = operand_descriptor(rule, &operands[1], anchor_binding, fields, key)?;
+    let left = operand_descriptor(rule, &operands[0], anchor_binding, fields, key, true)?;
+    let right = operand_descriptor(rule, &operands[1], anchor_binding, fields, key, true)?;
     if ordering_categories_are_compatible(left.category, right.category) {
         Ok(())
     } else {
@@ -1088,13 +1501,14 @@ fn operand_descriptor(
     anchor_binding: &str,
     fields: &FieldCatalog,
     key: Option<&BTreeMap<String, Value>>,
+    allow_temporal: bool,
 ) -> Result<OperandDescriptor, BindingPredicateError> {
     match operand {
         PredicateOperand::Column(column) => {
-            column_descriptor(rule, column, anchor_binding, fields, key)
+            column_descriptor(rule, column, anchor_binding, fields, key, allow_temporal)
         }
         PredicateOperand::Literal(value) => Ok(OperandDescriptor {
-            category: value_category(value),
+            category: DuckScalarCategory::Protocol(value_category(value)),
             column: None,
         }),
     }
@@ -1109,7 +1523,7 @@ fn membership_operand_descriptor(
 ) -> Result<OperandDescriptor, BindingPredicateError> {
     match operand {
         MembershipOperand::Operand(operand) => {
-            operand_descriptor(rule, operand, anchor_binding, fields, key)
+            operand_descriptor(rule, operand, anchor_binding, fields, key, false)
         }
         MembershipOperand::Set(_) => Err(bad_expression_structure(
             rule,
@@ -1124,6 +1538,7 @@ fn column_descriptor(
     anchor_binding: &str,
     fields: &FieldCatalog,
     key: Option<&BTreeMap<String, Value>>,
+    allow_temporal: bool,
 ) -> Result<OperandDescriptor, BindingPredicateError> {
     let column = ColumnId::new(
         column.binding.as_deref().unwrap_or(anchor_binding),
@@ -1137,9 +1552,25 @@ fn column_descriptor(
             field: column.field.clone(),
         })?;
     match &info.category {
-        Ok(category) => Ok(OperandDescriptor {
-            category: *category,
+        Ok(DuckScalarCategory::Protocol(category)) => Ok(OperandDescriptor {
+            category: DuckScalarCategory::Protocol(*category),
             column: Some(column),
+        }),
+        Ok(DuckScalarCategory::Temporal(kind)) if allow_temporal => Ok(OperandDescriptor {
+            category: DuckScalarCategory::Temporal(*kind),
+            column: Some(column),
+        }),
+        Ok(DuckScalarCategory::Temporal(kind)) => Err(BindingPredicateError::BadExpression {
+            rule_id: rule.id.clone(),
+            detail: json!({
+                "rule_id": rule.id,
+                "reason": "unrepresentable_operand",
+                "binding": anchor_binding,
+                "key": key,
+                "operand_binding": column.binding,
+                "field": column.field,
+                "value_type": kind.as_str(),
+            }),
         }),
         Err(error) => Err(BindingPredicateError::BadExpression {
             rule_id: rule.id.clone(),
@@ -1156,18 +1587,30 @@ fn column_descriptor(
     }
 }
 
-fn equality_categories_are_compatible(left: ScalarCategory, right: ScalarCategory) -> bool {
-    left.is_protocol_scalar()
-        && right.is_protocol_scalar()
-        && (left == right || left == ScalarCategory::Null || right == ScalarCategory::Null)
+fn equality_categories_are_compatible(left: DuckScalarCategory, right: DuckScalarCategory) -> bool {
+    match (left, right) {
+        (DuckScalarCategory::Protocol(left), DuckScalarCategory::Protocol(right)) => {
+            left.is_protocol_scalar()
+                && right.is_protocol_scalar()
+                && (left == right || left == ScalarCategory::Null || right == ScalarCategory::Null)
+        }
+        (DuckScalarCategory::Temporal(left), DuckScalarCategory::Temporal(right)) => left == right,
+        _ => false,
+    }
 }
 
-fn ordering_categories_are_compatible(left: ScalarCategory, right: ScalarCategory) -> bool {
-    left == right
-        && matches!(
-            left,
-            ScalarCategory::Boolean | ScalarCategory::Number | ScalarCategory::String
-        )
+fn ordering_categories_are_compatible(left: DuckScalarCategory, right: DuckScalarCategory) -> bool {
+    match (left, right) {
+        (DuckScalarCategory::Protocol(left), DuckScalarCategory::Protocol(right)) => {
+            left == right
+                && matches!(
+                    left,
+                    ScalarCategory::Boolean | ScalarCategory::Number | ScalarCategory::String
+                )
+        }
+        (DuckScalarCategory::Temporal(left), DuckScalarCategory::Temporal(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn incomparable_categories(
@@ -1222,60 +1665,50 @@ fn evaluate_expression(
     rule: &Rule,
     expression: &PredicateExpression,
     anchor_binding: &str,
-    key: &BTreeMap<String, Value>,
-    values: &BTreeMap<ColumnId, Value>,
+    row: &JoinedRow,
 ) -> Result<bool, BindingPredicateError> {
     match expression {
         PredicateExpression::Column(column) => Ok(!is_blank(require_column(
             rule,
             column,
             anchor_binding,
-            values,
+            row,
         )?)),
         PredicateExpression::Eq { eq } => {
-            evaluate_equality(rule, "eq", &eq[0], &eq[1], anchor_binding, key, values)
+            evaluate_equality(rule, "eq", &eq[0], &eq[1], anchor_binding, row)
         }
         PredicateExpression::Ne { ne } => {
-            evaluate_equality(rule, "ne", &ne[0], &ne[1], anchor_binding, key, values)
-                .map(|equal| !equal)
+            evaluate_equality(rule, "ne", &ne[0], &ne[1], anchor_binding, row).map(|equal| !equal)
         }
         PredicateExpression::Gt { gt } => {
-            evaluate_ordering(rule, "gt", &gt[0], &gt[1], anchor_binding, key, values)
-                .map(|ordering| ordering == Ordering::Greater)
+            evaluate_ordering(rule, "gt", &gt[0], &gt[1], anchor_binding, row)
         }
         PredicateExpression::Gte { gte } => {
-            evaluate_ordering(rule, "gte", &gte[0], &gte[1], anchor_binding, key, values)
-                .map(|ordering| matches!(ordering, Ordering::Greater | Ordering::Equal))
+            evaluate_ordering(rule, "gte", &gte[0], &gte[1], anchor_binding, row)
         }
         PredicateExpression::Lt { lt } => {
-            evaluate_ordering(rule, "lt", &lt[0], &lt[1], anchor_binding, key, values)
-                .map(|ordering| ordering == Ordering::Less)
+            evaluate_ordering(rule, "lt", &lt[0], &lt[1], anchor_binding, row)
         }
         PredicateExpression::Lte { lte } => {
-            evaluate_ordering(rule, "lte", &lte[0], &lte[1], anchor_binding, key, values)
-                .map(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal))
+            evaluate_ordering(rule, "lte", &lte[0], &lte[1], anchor_binding, row)
         }
         PredicateExpression::And { and } => {
             let mut result = true;
             for expression in and {
-                result &= evaluate_expression(rule, expression, anchor_binding, key, values)?;
+                result &= evaluate_expression(rule, expression, anchor_binding, row)?;
             }
             Ok(result)
         }
         PredicateExpression::Or { or } => {
             let mut result = false;
             for expression in or {
-                result |= evaluate_expression(rule, expression, anchor_binding, key, values)?;
+                result |= evaluate_expression(rule, expression, anchor_binding, row)?;
             }
             Ok(result)
         }
-        PredicateExpression::Not { not } => Ok(!evaluate_expression(
-            rule,
-            not,
-            anchor_binding,
-            key,
-            values,
-        )?),
+        PredicateExpression::Not { not } => {
+            Ok(!evaluate_expression(rule, not, anchor_binding, row)?)
+        }
         PredicateExpression::In { r#in } => {
             let MembershipOperand::Operand(operand) = &r#in[0] else {
                 return Err(bad_expression_structure(
@@ -1289,7 +1722,7 @@ fn evaluate_expression(
                     "expected set in second position of `in`",
                 ));
             };
-            let (left, left_column) = resolve_operand(rule, operand, anchor_binding, values)?;
+            let (left, left_column) = resolve_operand(rule, operand, anchor_binding, row)?;
             let mut matched = false;
             for member in set {
                 match values_equal(left, member) {
@@ -1299,7 +1732,7 @@ fn evaluate_expression(
                             rule,
                             "in",
                             anchor_binding,
-                            key,
+                            &row.key,
                             left,
                             member,
                             left_column.as_ref(),
@@ -1311,14 +1744,11 @@ fn evaluate_expression(
             Ok(matched)
         }
         PredicateExpression::IsNull { is_null: column } => {
-            Ok(require_column(rule, column, anchor_binding, values)?.is_null())
+            Ok(require_column(rule, column, anchor_binding, row)?.is_null())
         }
-        PredicateExpression::IsBlank { is_blank: column } => Ok(is_blank(require_column(
-            rule,
-            column,
-            anchor_binding,
-            values,
-        )?)),
+        PredicateExpression::IsBlank { is_blank: column } => {
+            Ok(is_blank(require_column(rule, column, anchor_binding, row)?))
+        }
     }
 }
 
@@ -1329,17 +1759,22 @@ fn evaluate_equality(
     left: &PredicateOperand,
     right: &PredicateOperand,
     anchor_binding: &str,
-    key: &BTreeMap<String, Value>,
-    values: &BTreeMap<ColumnId, Value>,
+    row: &JoinedRow,
 ) -> Result<bool, BindingPredicateError> {
-    let (left_value, left_column) = resolve_operand(rule, left, anchor_binding, values)?;
-    let (right_value, right_column) = resolve_operand(rule, right, anchor_binding, values)?;
+    if let Some(result) =
+        evaluate_native_comparison(rule, operator, left, right, anchor_binding, row)?
+    {
+        return Ok(if operator == "ne" { !result } else { result });
+    }
+
+    let (left_value, left_column) = resolve_operand(rule, left, anchor_binding, row)?;
+    let (right_value, right_column) = resolve_operand(rule, right, anchor_binding, row)?;
     values_equal(left_value, right_value).map_err(|_| {
         incomparable_values(
             rule,
             operator,
             anchor_binding,
-            key,
+            &row.key,
             left_value,
             right_value,
             left_column.as_ref(),
@@ -1355,37 +1790,114 @@ fn evaluate_ordering(
     left: &PredicateOperand,
     right: &PredicateOperand,
     anchor_binding: &str,
-    key: &BTreeMap<String, Value>,
-    values: &BTreeMap<ColumnId, Value>,
-) -> Result<Ordering, BindingPredicateError> {
-    let (left_value, left_column) = resolve_operand(rule, left, anchor_binding, values)?;
-    let (right_value, right_column) = resolve_operand(rule, right, anchor_binding, values)?;
-    compare_values(left_value, right_value).map_err(|_| {
+    row: &JoinedRow,
+) -> Result<bool, BindingPredicateError> {
+    if let Some(result) =
+        evaluate_native_comparison(rule, operator, left, right, anchor_binding, row)?
+    {
+        return Ok(result);
+    }
+
+    let (left_value, left_column) = resolve_operand(rule, left, anchor_binding, row)?;
+    let (right_value, right_column) = resolve_operand(rule, right, anchor_binding, row)?;
+    let ordering = compare_values(left_value, right_value).map_err(|_| {
         incomparable_values(
             rule,
             operator,
             anchor_binding,
-            key,
+            &row.key,
             left_value,
             right_value,
             left_column.as_ref(),
             right_column.as_ref(),
         )
+    })?;
+    Ok(match operator {
+        "gt" => ordering == Ordering::Greater,
+        "gte" => matches!(ordering, Ordering::Greater | Ordering::Equal),
+        "lt" => ordering == Ordering::Less,
+        "lte" => matches!(ordering, Ordering::Less | Ordering::Equal),
+        _ => unreachable!("ordering operator is collected from known predicate variants"),
     })
+}
+
+fn evaluate_native_comparison(
+    rule: &Rule,
+    operator: &str,
+    left: &PredicateOperand,
+    right: &PredicateOperand,
+    anchor_binding: &str,
+    row: &JoinedRow,
+) -> Result<Option<bool>, BindingPredicateError> {
+    let Some(left) = operand_column_id(left, anchor_binding) else {
+        return Ok(None);
+    };
+    let Some(right) = operand_column_id(right, anchor_binding) else {
+        return Ok(None);
+    };
+    let key = NativeComparisonKey {
+        operator: operator.to_owned(),
+        left,
+        right,
+    };
+    let Some(value) = row.native_comparisons.get(&key) else {
+        return Ok(None);
+    };
+    match value.result {
+        Some(result) => Ok(Some(result)),
+        None => Err(null_native_ordering(
+            rule,
+            &key,
+            value,
+            anchor_binding,
+            &row.key,
+        )),
+    }
+}
+
+fn null_native_ordering(
+    rule: &Rule,
+    comparison: &NativeComparisonKey,
+    value: &NativeComparisonValue,
+    anchor_binding: &str,
+    key: &BTreeMap<String, Value>,
+) -> BindingPredicateError {
+    let left = OperandDescriptor {
+        category: if value.left_is_null {
+            DuckScalarCategory::Protocol(ScalarCategory::Null)
+        } else {
+            DuckScalarCategory::Temporal(value.temporal_kind)
+        },
+        column: Some(comparison.left.clone()),
+    };
+    let right = OperandDescriptor {
+        category: if value.right_is_null {
+            DuckScalarCategory::Protocol(ScalarCategory::Null)
+        } else {
+            DuckScalarCategory::Temporal(value.temporal_kind)
+        },
+        column: Some(comparison.right.clone()),
+    };
+    incomparable_categories(
+        rule,
+        &comparison.operator,
+        anchor_binding,
+        Some(key),
+        &left,
+        &right,
+    )
 }
 
 fn resolve_operand<'a>(
     rule: &Rule,
     operand: &'a PredicateOperand,
     anchor_binding: &str,
-    values: &'a BTreeMap<ColumnId, Value>,
+    row: &'a JoinedRow,
 ) -> Result<(&'a Value, Option<ColumnId>), BindingPredicateError> {
     match operand {
         PredicateOperand::Column(column) => {
             let id = resolved_column_id(column, anchor_binding);
-            let value = values
-                .get(&id)
-                .ok_or_else(|| missing_projected_column(rule, &id))?;
+            let value = row.protocol_value(rule, anchor_binding, &id)?;
             Ok((value, Some(id)))
         }
         PredicateOperand::Literal(value) => Ok((value, None)),
@@ -1396,12 +1908,10 @@ fn require_column<'a>(
     rule: &Rule,
     column: &verify_core::constraint::ColumnReference,
     anchor_binding: &str,
-    values: &'a BTreeMap<ColumnId, Value>,
+    row: &'a JoinedRow,
 ) -> Result<&'a Value, BindingPredicateError> {
     let id = resolved_column_id(column, anchor_binding);
-    values
-        .get(&id)
-        .ok_or_else(|| missing_projected_column(rule, &id))
+    row.protocol_value(rule, anchor_binding, &id)
 }
 
 fn resolved_column_id(
@@ -1438,11 +1948,11 @@ fn incomparable_values(
     right_column: Option<&ColumnId>,
 ) -> BindingPredicateError {
     let left = OperandDescriptor {
-        category: value_category(left),
+        category: DuckScalarCategory::Protocol(value_category(left)),
         column: left_column.cloned(),
     };
     let right = OperandDescriptor {
-        category: value_category(right),
+        category: DuckScalarCategory::Protocol(value_category(right)),
         column: right_column.cloned(),
     };
     incomparable_categories(rule, operator, anchor_binding, Some(key), &left, &right)
@@ -1463,13 +1973,10 @@ fn localized_anchor_column(
     expression: &PredicateExpression,
     anchor_binding: &str,
 ) -> Option<ColumnId> {
-    let mut columns = BTreeSet::new();
+    let mut anchor_columns = BTreeSet::new();
     match expression {
         PredicateExpression::Column(column) => {
-            columns.insert(ColumnId::new(
-                column.binding.as_deref().unwrap_or(anchor_binding),
-                &column.column,
-            ));
+            maybe_insert_anchor_column(column, anchor_binding, &mut anchor_columns);
         }
         PredicateExpression::Eq { eq }
         | PredicateExpression::Ne { ne: eq }
@@ -1479,40 +1986,42 @@ fn localized_anchor_column(
         | PredicateExpression::Lte { lte: eq } => {
             for operand in eq {
                 if let PredicateOperand::Column(column) = operand {
-                    columns.insert(ColumnId::new(
-                        column.binding.as_deref().unwrap_or(anchor_binding),
-                        &column.column,
-                    ));
+                    maybe_insert_anchor_column(column, anchor_binding, &mut anchor_columns);
                 }
             }
         }
         PredicateExpression::In { r#in } => {
             if let MembershipOperand::Operand(PredicateOperand::Column(column)) = &r#in[0] {
-                columns.insert(ColumnId::new(
-                    column.binding.as_deref().unwrap_or(anchor_binding),
-                    &column.column,
-                ));
+                maybe_insert_anchor_column(column, anchor_binding, &mut anchor_columns);
             }
         }
         PredicateExpression::IsNull { is_null: column }
         | PredicateExpression::IsBlank { is_blank: column } => {
-            columns.insert(ColumnId::new(
-                column.binding.as_deref().unwrap_or(anchor_binding),
-                &column.column,
-            ));
+            maybe_insert_anchor_column(column, anchor_binding, &mut anchor_columns);
         }
         PredicateExpression::Not { .. }
         | PredicateExpression::And { .. }
         | PredicateExpression::Or { .. } => return None,
     }
 
-    if columns.len() != 1 {
+    if anchor_columns.len() != 1 {
         return None;
     }
-    columns
-        .into_iter()
-        .next()
-        .filter(|column| column.binding == anchor_binding)
+    anchor_columns.into_iter().next()
+}
+
+fn maybe_insert_anchor_column(
+    column: &verify_core::constraint::ColumnReference,
+    anchor_binding: &str,
+    columns: &mut BTreeSet<ColumnId>,
+) {
+    let column = ColumnId::new(
+        column.binding.as_deref().unwrap_or(anchor_binding),
+        &column.column,
+    );
+    if column.binding == anchor_binding {
+        columns.insert(column);
+    }
 }
 
 fn sql_error(rule: &Rule, error: duckdb::Error) -> BindingPredicateError {
@@ -1613,8 +2122,8 @@ mod tests {
                 .and_then(|key| key.get("loan_id")),
             Some(&json!("L-2"))
         );
-        assert!(result.affected[0].field.is_none());
-        assert!(result.affected[0].value.is_none());
+        assert_eq!(result.affected[0].field.as_deref(), Some("value"));
+        assert_eq!(result.affected[0].value.as_ref(), Some(&json!("changed")));
         Ok(())
     }
 
@@ -1670,7 +2179,7 @@ mod tests {
         let analysis = analyze_predicate(binding, expr);
         let fields = preflight_fields(&rule, &analysis, &registry)?;
         let keys = validate_keys(&rule, &analysis, &fields, &connection, &registry)?;
-        let plan = build_join_query(&rule, &analysis, &fields, &keys, &registry)?;
+        let plan = build_join_query(&rule, expr, &analysis, &fields, &keys, &registry)?;
         assert_eq!(plan.sql.matches("LEFT JOIN \"prior\"").count(), 1);
         assert_eq!(plan.sql.matches("LEFT JOIN \"auxiliary\"").count(), 1);
         assert!(!plan.sql.contains("CROSS JOIN"));
@@ -1826,6 +2335,26 @@ mod tests {
     }
 
     #[test]
+    fn temporal_key_fields_remain_refused_because_keys_need_protocol_identity()
+    -> Result<(), Box<dyn Error>> {
+        let (connection, registry) = setup(
+            "CREATE TABLE current (id DATE, value INTEGER);
+             INSERT INTO current VALUES (DATE '2026-01-01', 10);
+             CREATE TABLE prior (prior_id DATE, value INTEGER);
+             INSERT INTO prior VALUES (DATE '2026-01-01', 10);",
+            vec![binding("current", &["id"]), binding("prior", &["prior_id"])],
+        )?;
+
+        let error = evaluate_rule(&immutable_value_rule(), &connection, &registry)
+            .expect_err("temporal key fields should refuse");
+        assert_eq!(error.refusal_code(), RefusalCode::KeyInvalid);
+        assert_eq!(error.detail()["reason"], "unrepresentable_component");
+        assert_eq!(error.detail()["value_type"], "date");
+        assert_eq!(error.detail()["field"], "id");
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_non_anchor_only_keys_still_refuse() -> Result<(), Box<dyn Error>> {
         let (connection, registry) = setup(
             "CREATE TABLE current (id INTEGER, value INTEGER);
@@ -1929,6 +2458,119 @@ mod tests {
         assert_eq!(error.refusal_code(), RefusalCode::BadExpr);
         assert_eq!(error.detail()["left_type"], "null");
         assert_eq!(error.detail()["right_type"], "null");
+        assert_eq!(error.detail()["key"]["id"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_column_comparisons_use_native_duckdb_verdicts() -> Result<(), Box<dyn Error>> {
+        let (connection, registry) = setup(
+            "CREATE TABLE current (
+                id INTEGER,
+                date_value DATE,
+                timestamp_value TIMESTAMP,
+                time_value TIME,
+                interval_value INTERVAL
+             );
+             INSERT INTO current VALUES (
+                1,
+                DATE '2026-02-01',
+                TIMESTAMP '2026-02-01 12:00:01',
+                TIME '12:00:01',
+                INTERVAL '2 days'
+             );
+             CREATE TABLE prior (
+                prior_id INTEGER,
+                date_value DATE,
+                timestamp_value TIMESTAMP,
+                time_value TIME,
+                interval_value INTERVAL
+             );
+             INSERT INTO prior VALUES (
+                1,
+                DATE '2026-01-31',
+                TIMESTAMP '2026-02-01 12:00:00',
+                TIME '12:00:00',
+                INTERVAL '1 day'
+             );",
+            vec![binding("current", &["id"]), binding("prior", &["prior_id"])],
+        )?;
+        let column = |binding: &str, name: &str| json!({ "binding": binding, "column": name });
+        let rule = predicate_rule(
+            "TEMPORAL_NATIVE",
+            json!({
+                "and": [
+                    {"gt": [column("current", "date_value"), column("prior", "date_value")]},
+                    {"gte": [column("current", "timestamp_value"), column("prior", "timestamp_value")]},
+                    {"lt": [column("prior", "time_value"), column("current", "time_value")]},
+                    {"lte": [column("prior", "interval_value"), column("current", "interval_value")]},
+                    {"ne": [column("current", "date_value"), column("prior", "date_value")]}
+                ]
+            }),
+        );
+
+        let result = evaluate_rule(&rule, &connection, &registry)?;
+        assert_eq!(result.status, ResultStatus::Pass);
+        assert_eq!(result.violation_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_failures_localize_anchor_value_with_report_only_cast() -> Result<(), Box<dyn Error>>
+    {
+        let (connection, registry) = setup(
+            "CREATE TABLE current (id VARCHAR, date_value DATE);
+             INSERT INTO current VALUES ('L-1', DATE '2026-01-02');
+             CREATE TABLE prior (prior_id VARCHAR, date_value DATE);
+             INSERT INTO prior VALUES ('L-1', DATE '2026-01-01');",
+            vec![binding("current", &["id"]), binding("prior", &["prior_id"])],
+        )?;
+        let rule = predicate_rule(
+            "TEMPORAL_RENDER",
+            json!({
+                "eq": [
+                    {"column": "date_value"},
+                    {"binding": "prior", "column": "date_value"}
+                ]
+            }),
+        );
+
+        let result = evaluate_rule(&rule, &connection, &registry)?;
+        assert_eq!(result.status, ResultStatus::Fail);
+        assert_eq!(result.violation_count, 1);
+        assert_eq!(result.affected[0].field.as_deref(), Some("date_value"));
+        assert_eq!(
+            result.affected[0].value.as_ref(),
+            Some(&json!("2026-01-02"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn temporal_native_ordering_refuses_null_operands() -> Result<(), Box<dyn Error>> {
+        let (connection, registry) = setup(
+            "CREATE TABLE current (id INTEGER, date_value DATE);
+             INSERT INTO current VALUES (1, NULL);
+             CREATE TABLE prior (prior_id INTEGER, date_value DATE);
+             INSERT INTO prior VALUES (1, DATE '2026-01-01');",
+            vec![binding("current", &["id"]), binding("prior", &["prior_id"])],
+        )?;
+        let rule = predicate_rule(
+            "TEMPORAL_NULL_ORDERING",
+            json!({
+                "gte": [
+                    {"column": "date_value"},
+                    {"binding": "prior", "column": "date_value"}
+                ]
+            }),
+        );
+
+        let error = evaluate_rule(&rule, &connection, &registry)
+            .expect_err("ordering over a null temporal operand should refuse");
+        assert_eq!(error.refusal_code(), RefusalCode::BadExpr);
+        assert_eq!(error.detail()["operator"], "gte");
+        assert_eq!(error.detail()["left_type"], "null");
+        assert_eq!(error.detail()["right_type"], "date");
         assert_eq!(error.detail()["key"]["id"], 1);
         Ok(())
     }
