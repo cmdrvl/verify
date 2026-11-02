@@ -12,6 +12,7 @@ version = "0.5.1"
 edition = "2024"
 authors = ["CMD+RVL <engineering@cmdrvl.com>"]
 license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/cmdrvl/verify"
 
 [workspace.dependencies]
