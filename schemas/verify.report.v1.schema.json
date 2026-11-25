@@ -325,7 +325,8 @@
         "E_KEY_CONFLICT",
         "E_INPUT_NOT_LOCKED",
         "E_INPUT_DRIFT",
-        "E_TOO_LARGE"
+        "E_TOO_LARGE",
+        "E_REDACTION_KEY"
       ]
     },
     "refusal": {

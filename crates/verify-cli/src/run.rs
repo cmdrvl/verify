@@ -20,6 +20,7 @@ use verify_duckdb::{
 };
 use verify_engine::{Relation, SummaryEngine, portable_relation, portable_row};
 
+use crate::redact::{ENV_KEY, KeyError, MIN_KEY_BYTES, RedactionKey};
 use crate::witness::{self, WitnessInput};
 
 pub const SHORTCUT_SUBCOMMAND: &str = "__shortcut__";
@@ -150,23 +151,74 @@ impl RunCommandResult {
 // ---------------------------------------------------------------------------
 
 pub fn execute(args: RunArgs) -> RunCommandResult {
+    let key = match RedactionKey::from_env() {
+        Ok(key) => key,
+        Err(error) => {
+            let mut result =
+                RunCommandResult::refusal(redaction_key_refusal(error), args.common.json);
+            append_witness_for_run(&args, &mut result);
+            return result;
+        }
+    };
     let mut report = run_batch(&args);
-    if !args.common.explicit {
-        crate::redact::redact_report(&mut report);
-    }
+    redact_unless_explicit(&mut report, &args.common, key.as_ref());
     let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_run(&args, &mut result);
     result
 }
 
 pub fn execute_shortcut(args: ShortcutArgs) -> RunCommandResult {
+    let key = match RedactionKey::from_env() {
+        Ok(key) => key,
+        Err(error) => {
+            let mut result =
+                RunCommandResult::refusal(redaction_key_refusal(error), args.common.json);
+            append_witness_for_shortcut(&args, &mut result);
+            return result;
+        }
+    };
     let mut report = run_shortcut(&args);
-    if !args.common.explicit {
-        crate::redact::redact_report(&mut report);
-    }
+    redact_unless_explicit(&mut report, &args.common, key.as_ref());
     let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_shortcut(&args, &mut result);
     result
+}
+
+fn redact_unless_explicit(
+    report: &mut VerifyReport,
+    common: &CommonRunArgs,
+    key: Option<&RedactionKey>,
+) {
+    if common.explicit {
+        return;
+    }
+    // `--sample-affected` limits only the human output; JSON always prints every entry.
+    let emitted_per_rule = if common.json {
+        None
+    } else {
+        common.sample_affected
+    };
+    crate::redact::redact_report(report, key, emitted_per_rule);
+}
+
+/// A set-but-unusable `VERIFY_REDACTION_KEY` is refused before any input is read. The message
+/// and detail name the variable and the rule, never the key or its length.
+fn redaction_key_refusal(error: KeyError) -> VerifyReport {
+    batch_refusal(
+        RefusalCode::RedactionKey,
+        format!(
+            "{ENV_KEY} is set but {}; it must be at least {MIN_KEY_BYTES} bytes",
+            match error {
+                KeyError::Empty => "empty",
+                KeyError::TooShort => "too short",
+            }
+        ),
+        json!({
+            "env_var": ENV_KEY,
+            "reason": error.reason(),
+            "min_bytes": MIN_KEY_BYTES,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------

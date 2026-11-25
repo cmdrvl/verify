@@ -20,6 +20,10 @@ name = "cli"
 path = "../../tests/cli.rs"
 
 [[test]]
+name = "redaction"
+path = "../../tests/redaction.rs"
+
+[[test]]
 name = "doctor"
 path = "../../tests/doctor.rs"
 
@@ -65,6 +69,7 @@ duckdb = "1.4.4"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+hmac = "0.12"
 sha2 = "0.10"
 verify-core = { path = "../verify-core" }
 verify-duckdb = { path = "../verify-duckdb" }

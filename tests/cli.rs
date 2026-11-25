@@ -979,6 +979,7 @@ fn write_canary_input(ledger: &TestLedger) -> String {
 
 fn run_with(constraints: &std::path::Path, bind: &str, extra: &[&str]) -> std::process::Output {
     verify_command()
+        .env_remove("VERIFY_REDACTION_KEY")
         .args(["run", &constraints.to_string_lossy(), "--bind", bind])
         .args(extra)
         .arg("--no-witness")
@@ -1016,7 +1017,8 @@ fn failing_rows_are_redacted_by_default_and_raw_only_with_explicit() {
             !text.contains(CANARY_CELL),
             "cell leaked ({extra:?}): {text}"
         );
-        assert!(text.contains("redacted:sha256:"), "{extra:?}: {text}");
+        assert!(text.contains("redacted:ref:k1"), "{extra:?}: {text}");
+        assert!(text.contains("redacted:ref:v1"), "{extra:?}: {text}");
         assert!(text.contains("HOSTILE"), "rule id must stay: {text}");
     }
 
@@ -1029,7 +1031,7 @@ fn failing_rows_are_redacted_by_default_and_raw_only_with_explicit() {
     assert!(
         entry["key"]["property_id"]
             .as_str()
-            .is_some_and(|t| t.starts_with("redacted:sha256:"))
+            .is_some_and(|t| t == "redacted:ref:k1")
     );
     // Deterministic: a second run gives byte-identical output.
     let again = run_with(&constraints, &bind, &["--json"]);

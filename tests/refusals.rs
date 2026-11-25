@@ -212,7 +212,7 @@ fn run_incomparable_predicate_operands_produces_bad_expr_refusal() {
     let key_token = report["refusal"]["detail"]["key"]["id"]
         .as_str()
         .expect("key id token");
-    assert!(key_token.starts_with("redacted:sha256:"), "{key_token}");
+    assert_eq!(key_token, "redacted:ref:k1");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("row-1"));
     assert_eq!(report["refusal"]["detail"]["field"], "value");
 }

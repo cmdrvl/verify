@@ -39,6 +39,8 @@ pub enum RefusalCode {
     InputDrift,
     #[serde(rename = "E_TOO_LARGE")]
     TooLarge,
+    #[serde(rename = "E_REDACTION_KEY")]
+    RedactionKey,
 }
 
 impl RefusalCode {
@@ -64,6 +66,9 @@ impl RefusalCode {
             Self::InputNotLocked => "Lock the input or provide the correct lock.",
             Self::InputDrift => "Use the locked artifact or regenerate the lock intentionally.",
             Self::TooLarge => "Increase the limit or split the input.",
+            Self::RedactionKey => {
+                "Set VERIFY_REDACTION_KEY to at least 16 bytes, or unset it to use ordinal refs."
+            }
         }
     }
 }

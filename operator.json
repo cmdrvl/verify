@@ -94,7 +94,7 @@
       "name": "explicit",
       "flag": "--explicit",
       "type": "flag",
-      "description": "run: include raw failing key and cell values (and DuckDB error text) in output. Default output replaces them with opaque redacted:sha256: tokens. Protected profiles should block this flag."
+      "description": "run: include raw failing key and cell values (and DuckDB error text) in output. Default output replaces them with ordinal refs (redacted:ref:k1.., redacted:ref:v1..), or keyed HMAC markers when VERIFY_REDACTION_KEY is set. Protected profiles should block this flag."
     },
     {
       "name": "no_witness",
@@ -396,10 +396,19 @@
       "code": "E_TOO_LARGE",
       "message": "Input exceeds --max-rows or --max-bytes",
       "action": "raise_limit_or_split_input"
+    },
+    {
+      "code": "E_REDACTION_KEY",
+      "message": "VERIFY_REDACTION_KEY is set but empty or shorter than 16 bytes",
+      "action": "set_key_of_at_least_16_bytes_or_unset"
     }
   ],
 
   "env_vars": [
+    {
+      "name": "VERIFY_REDACTION_KEY",
+      "description": "Optional operator-held key (at least 16 bytes) for verify run. When set, redacted key and cell values become stable HMAC-SHA256 markers (redacted:hmac-sha256:<32 hex>) instead of per-run ordinal refs (redacted:ref:k1.., redacted:ref:v1..). Set but empty or too short refuses with E_REDACTION_KEY; it never falls back to ordinals. The value is never printed, logged or written to the witness ledger."
+    },
     {
       "name": "EPISTEMIC_WITNESS",
       "description": "Explicit witness ledger path; overrides the implicit ledger and disables legacy migration",
