@@ -68,6 +68,7 @@ fn run_json(compiled: &Path, current: &Path, prior: &Path) -> Output {
             "--bind",
             &format!("prior={}", prior.display()),
             "--json",
+            "--explicit",
             "--no-witness",
         ])
         .output()
@@ -206,6 +207,7 @@ fn human_failure_preserves_exit_and_anchor_localization_contract() {
             &format!("prior={}", prior.display()),
             "--sample-affected",
             "1",
+            "--explicit",
             "--no-witness",
         ])
         .output()

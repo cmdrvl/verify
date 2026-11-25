@@ -5,6 +5,7 @@ use std::{ffi::OsString, process::ExitCode};
 mod compile;
 mod doctor;
 mod paths;
+mod redact;
 mod render;
 #[allow(clippy::result_large_err)]
 mod run;

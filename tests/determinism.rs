@@ -68,7 +68,7 @@ fn run_verify_json(compiled: &Path, binds: &[(&str, &Path)]) -> Output {
     }
 
     command
-        .args(["--json", "--no-witness"])
+        .args(["--json", "--explicit", "--no-witness"])
         .output()
         .expect("verify command should run")
 }

@@ -38,6 +38,9 @@ pub struct CommonRunArgs {
     pub sample_affected: Option<usize>,
     #[arg(long)]
     pub no_witness: bool,
+    /// Include raw failing keys and cell values (default output is redacted).
+    #[arg(long)]
+    pub explicit: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -147,14 +150,20 @@ impl RunCommandResult {
 // ---------------------------------------------------------------------------
 
 pub fn execute(args: RunArgs) -> RunCommandResult {
-    let report = run_batch(&args);
+    let mut report = run_batch(&args);
+    if !args.common.explicit {
+        crate::redact::redact_report(&mut report);
+    }
     let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_run(&args, &mut result);
     result
 }
 
 pub fn execute_shortcut(args: ShortcutArgs) -> RunCommandResult {
-    let report = run_shortcut(&args);
+    let mut report = run_shortcut(&args);
+    if !args.common.explicit {
+        crate::redact::redact_report(&mut report);
+    }
     let mut result = report_to_result(report, args.common.json, args.common.sample_affected);
     append_witness_for_shortcut(&args, &mut result);
     result
@@ -531,13 +540,23 @@ fn materialize_all_bindings(
         let relation =
             materialize_relation(connection, loaded.relation_name(), key_fields, &projection)
                 .map_err(|error| {
+                    let detail = match &error {
+                        // The column name comes from the constraints, and the text
+                        // names only a DuckDB type, so default redaction keeps it.
+                        MaterializeError::Unrepresentable { column, .. } => {
+                            json!({ "binding": name, "column": column, "error": error.to_string() })
+                        }
+                        MaterializeError::Duckdb(_) => {
+                            json!({ "binding": name, "error": error.to_string() })
+                        }
+                    };
                     VerifyReport::refusal(
                         ExecutionMode::Batch,
                         constraints.constraint_set_id.clone(),
                         constraint_hash,
                         RefusalCode::SqlError,
                         format!("failed to materialize binding {name}: {error}"),
-                        json!({ "binding": name, "error": error.to_string() }),
+                        detail,
                     )
                 })?;
         relations.insert(name.to_owned(), relation);
@@ -545,12 +564,29 @@ fn materialize_all_bindings(
     Ok(relations)
 }
 
+enum MaterializeError {
+    /// DuckDB's own error text, which can quote data.
+    Duckdb(String),
+    /// A column holds a type with no protocol scalar form; the text names a type only.
+    Unrepresentable { column: String, text: String },
+}
+
+impl std::fmt::Display for MaterializeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duckdb(text) => formatter.write_str(text),
+            Self::Unrepresentable { column, text } => write!(formatter, "column {column}: {text}"),
+        }
+    }
+}
+
 fn materialize_relation(
     connection: &duckdb::Connection,
     relation_name: &str,
     key_fields: Vec<String>,
     projection: &[&str],
-) -> Result<Relation, String> {
+) -> Result<Relation, MaterializeError> {
+    let duck = |error: duckdb::Error| MaterializeError::Duckdb(error.to_string());
     // A rule may read a relation for its row count alone, with no column of
     // its own. Counting keeps that row identity without converting any value.
     if projection.is_empty() {
@@ -560,7 +596,7 @@ fn materialize_relation(
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(duck)?;
         let rows = vec![BTreeMap::new(); usize::try_from(row_count).unwrap_or(usize::MAX)];
         return Ok(Relation::new(key_fields, rows));
     }
@@ -572,18 +608,20 @@ fn materialize_relation(
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!("SELECT {selected} FROM {relation_name}");
-    let mut statement = connection
-        .prepare(&query)
-        .map_err(|error| error.to_string())?;
-    let mut duckdb_rows = statement.query([]).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare(&query).map_err(duck)?;
+    let mut duckdb_rows = statement.query([]).map_err(duck)?;
 
     let mut rows = Vec::new();
-    while let Some(row) = duckdb_rows.next().map_err(|error| error.to_string())? {
+    while let Some(row) = duckdb_rows.next().map_err(duck)? {
         let mut row_map = BTreeMap::new();
         for (i, col_name) in column_names.iter().enumerate() {
-            let duck_value: duckdb::types::Value = row.get(i).map_err(|error| error.to_string())?;
-            let protocol_value = duckdb_value_to_protocol(duck_value)
-                .map_err(|error| format!("column {col_name}: {error}"))?;
+            let duck_value: duckdb::types::Value = row.get(i).map_err(duck)?;
+            let protocol_value = duckdb_value_to_protocol(duck_value).map_err(|error| {
+                MaterializeError::Unrepresentable {
+                    column: col_name.clone(),
+                    text: error.to_string(),
+                }
+            })?;
             row_map.insert(col_name.clone(), protocol_value);
         }
         rows.push(row_map);

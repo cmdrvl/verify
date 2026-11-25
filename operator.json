@@ -11,8 +11,8 @@
   "invocation": {
     "binary": "verify",
     "usage": [
-      "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]",
-      "verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]",
+      "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]",
+      "verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]",
       "verify doctor triage --json",
       "verify capabilities --json",
       "verify robot-docs guide",
@@ -89,6 +89,12 @@
       "flag": "--sample-affected",
       "type": "integer",
       "description": "Limit human output to the first N localized affected entries per failing rule"
+    },
+    {
+      "name": "explicit",
+      "flag": "--explicit",
+      "type": "flag",
+      "description": "run: include raw failing key and cell values (and DuckDB error text) in output. Default output replaces them with opaque redacted:sha256: tokens. Protected profiles should block this flag."
     },
     {
       "name": "no_witness",
@@ -184,7 +190,7 @@
       "name": "run",
       "description": "Evaluate compiled constraints against one or more named relation bindings",
       "status": "available",
-      "usage": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]",
+      "usage": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]",
       "read_only": false,
       "current_runtime_behavior": {
         "writes_witness": "unless --no-witness is set",

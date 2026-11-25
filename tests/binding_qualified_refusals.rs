@@ -82,7 +82,7 @@ fn run_json(compiled: &Path, bindings: &[(&str, PathBuf)]) -> Output {
         command.args(["--bind", bind]);
     }
     command
-        .args(["--json", "--no-witness"])
+        .args(["--json", "--explicit", "--no-witness"])
         .output()
         .expect("verify run should execute")
 }

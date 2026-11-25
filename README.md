@@ -223,8 +223,8 @@ subcommand (`verify docter`) is refused with exit `2` and a "did you mean
 ## Commands
 
 ```text
-verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]
-verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]
+verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]
+verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]
 verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
 verify compile --schema
 verify validate <COMPILED_CONSTRAINTS> [--json]
@@ -411,6 +411,14 @@ FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=n
 ```
 
 When a failing rule has many localized rows, `--sample-affected <N>` limits the human output to the first `N` affected entries per failing rule and adds a preview note when additional entries were omitted. JSON output is unchanged.
+
+### Redaction (`--explicit`)
+
+Default `verify run` output is redacted: the raw key values and cell values of failing rows are replaced by opaque, deterministic tokens (`redacted:sha256:<16 hex>`), so a failing rule cannot print bound data into a log or a model's context. Rule ids, severities, counts, binding names, key column names, field names, and the JSON shape are unchanged. DuckDB error text on a `SQL_ERROR` refusal (which can quote the offending cell) is withheld too. Pass `--explicit` to get the raw values back, for example `verify run c.verify.json --bind input=data.csv --json --explicit`.
+
+What is **not** redacted, with or without `--explicit`: column and binding names, rule ids, the rule's own SQL or predicate text, file paths, and counts. And the tokens are unsalted SHA-256 prefixes, so a low-entropy value (a status code, a small integer) can be recovered by guessing. Treat redaction as "no raw values in the output", not as anonymization.
+
+Changed in this release: outputs that used to show raw `key` and `value` fields now show tokens unless `--explicit` is passed. Exit codes and the report shape are unchanged.
 
 ---
 

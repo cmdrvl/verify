@@ -387,6 +387,7 @@ fn run_fail_with_sample_affected_renders_localized_preview() {
             &bind,
             "--sample-affected",
             "1",
+            "--explicit",
             "--no-witness",
         ])
         .output()
@@ -831,6 +832,7 @@ fn run_query_rules_json_fail_has_localization() {
             "--bind",
             &bind_tenants,
             "--json",
+            "--explicit",
             "--no-witness",
         ])
         .output()
@@ -869,6 +871,7 @@ fn run_query_rules_human_sample_preview_shows_binding_key_field_and_value() {
             &bind_tenants,
             "--sample-affected",
             "1",
+            "--explicit",
             "--no-witness",
         ])
         .output()
@@ -955,4 +958,121 @@ fn schema_flag_prints_report_schema() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"title\": \"verify.report.v1\""));
+}
+
+// ---------------------------------------------------------------------------
+// Default redaction of failing-row output (bd-q4d)
+// ---------------------------------------------------------------------------
+
+const CANARY_KEY: &str = "CANARY-KEY-7f3a91";
+const CANARY_CELL: &str = "CANARY-CELL-c2d8e4";
+
+fn write_canary_input(ledger: &TestLedger) -> String {
+    let path = ledger.root.join("canary.csv");
+    fs::write(
+        &path,
+        format!("property_id,secret\n{CANARY_KEY},{CANARY_CELL}\n"),
+    )
+    .expect("write canary input");
+    format!("property={}", path.display())
+}
+
+fn run_with(constraints: &std::path::Path, bind: &str, extra: &[&str]) -> std::process::Output {
+    verify_command()
+        .args(["run", &constraints.to_string_lossy(), "--bind", bind])
+        .args(extra)
+        .arg("--no-witness")
+        .output()
+        .expect("verify run should execute")
+}
+
+fn combined(output: &std::process::Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn failing_rows_are_redacted_by_default_and_raw_only_with_explicit() {
+    let ledger = TestLedger::new("redact-rows");
+    let bind = write_canary_input(&ledger);
+    let constraints = write_query_constraints(
+        &ledger,
+        "SELECT property_id AS key__property_id, secret AS value FROM property",
+    );
+
+    for extra in [
+        &["--json"][..],
+        &[][..],
+        &["--json", "--sample-affected", "1"][..],
+    ] {
+        let output = run_with(&constraints, &bind, extra);
+        assert_eq!(output.status.code(), Some(1), "{extra:?}");
+        let text = combined(&output);
+        assert!(!text.contains(CANARY_KEY), "key leaked ({extra:?}): {text}");
+        assert!(
+            !text.contains(CANARY_CELL),
+            "cell leaked ({extra:?}): {text}"
+        );
+        assert!(text.contains("redacted:sha256:"), "{extra:?}: {text}");
+        assert!(text.contains("HOSTILE"), "rule id must stay: {text}");
+    }
+
+    // JSON shape is kept: counts, binding and key column name survive redaction.
+    let output = run_with(&constraints, &bind, &["--json"]);
+    let report: Value = serde_json::from_slice(&output.stdout).expect("json report");
+    let entry = &report["results"][0]["affected"][0];
+    assert_eq!(report["results"][0]["violation_count"], 1);
+    assert_eq!(entry["binding"], "property");
+    assert!(
+        entry["key"]["property_id"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("redacted:sha256:"))
+    );
+    // Deterministic: a second run gives byte-identical output.
+    let again = run_with(&constraints, &bind, &["--json"]);
+    assert_eq!(output.stdout, again.stdout);
+
+    // Control: --explicit restores the raw values, so the redaction above is
+    // the flag's doing and not a test that can never see the data.
+    let explicit = run_with(&constraints, &bind, &["--json", "--explicit"]);
+    let text = combined(&explicit);
+    assert!(
+        text.contains(CANARY_KEY) && text.contains(CANARY_CELL),
+        "{text}"
+    );
+    let human = run_with(&constraints, &bind, &["--explicit"]);
+    assert!(combined(&human).contains(CANARY_CELL));
+}
+
+#[test]
+fn sql_error_text_that_quotes_a_cell_is_redacted_by_default() {
+    let ledger = TestLedger::new("redact-sql-error");
+    let bind = write_canary_input(&ledger);
+    // DuckDB's conversion error quotes the offending string.
+    let constraints = write_query_constraints(
+        &ledger,
+        "SELECT property_id AS key__property_id FROM property WHERE CAST(secret AS INTEGER) > 0",
+    );
+
+    let explicit = run_with(&constraints, &bind, &["--json", "--explicit"]);
+    assert_eq!(explicit.status.code(), Some(2));
+    assert!(
+        combined(&explicit).contains(CANARY_CELL),
+        "control: DuckDB error text should quote the cell: {}",
+        combined(&explicit)
+    );
+
+    for extra in [&["--json"][..], &[][..]] {
+        let output = run_with(&constraints, &bind, extra);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}");
+        let text = combined(&output);
+        assert!(
+            !text.contains(CANARY_CELL),
+            "SQL error leaked ({extra:?}): {text}"
+        );
+        assert!(!text.contains(CANARY_KEY), "{text}");
+    }
 }
