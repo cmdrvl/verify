@@ -412,6 +412,10 @@ FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=n
 
 When a failing rule has many localized rows, `--sample-affected <N>` limits the human output to the first `N` affected entries per failing rule and adds a preview note when additional entries were omitted. JSON output is unchanged.
 
+### Excel inputs (`.xlsx`, `.xlsm`, `.xls`)
+
+`--bind tape=report.xlsx#loans` binds one worksheet, by name or 0-based index (digits select an index unless a sheet has that exact name). The worksheet is read by the shared [`cmdrvl-tabular`](https://github.com/cmdrvl/tabular) reader and loaded exactly like a CSV of the same data, so identical rules give identical results over CSV, Parquet and XLSX (golden tests in `tests/xlsx_bindings.rs`). A workbook with more than one sheet and no `#Sheet` refuses with `E_FORMAT_DETECT` (the detail names `E_AMBIGUOUS_SHEET` and lists the sheet names); an unknown sheet refuses the same way (`E_SHEET_NOT_FOUND`). Cells are rendered as canonical text (numbers `2000.0` and `2000` both become `2000`; date cells render as `YYYY-MM-DD` or a datetime); duration cells, error cells and some out-of-range values refuse. The exact rules are in the tabular README. The sheet selector works with `--bind` only: the `verify DATASET --rules` shortcut can open a one-sheet workbook but cannot select a sheet. Locks hash the `.xlsx` file bytes, not the worksheet. Not covered: the temporal and decimal behaviour of the tabular v1 reader beyond what its own tests prove, and workbooks whose values depend on volatile formulas.
+
 ### Input locks (`--lock`)
 
 `--lock <LOCKFILE>` (repeatable) checks each bound input against a lockfile before any rule runs. It reads the canonical `lock.v0` manifest that `vacuum | hashbytes | lock` writes: each `members[].bytes_hash` is `sha256:<hex>` or `blake3:<hex>` of the raw file bytes, and verify hashes the bound file with the member's own algorithm. A member matches by exact path, otherwise by a unique basename (real locks store paths relative to the vacuum root); an ambiguous basename counts as not locked. Different bytes refuse with `E_INPUT_DRIFT`, a bound input with no member refuses with `E_INPUT_NOT_LOCKED`, and an unknown hash algorithm, a member with no `bytes_hash`, or an unknown lock version refuses with `E_IO` (exit 2). The old verify-private `lock.input.v1` format (`content_hash`, sha256 only) is still read and is deprecated. Not checked: the lock's own `lock_hash` self-hash.
@@ -436,7 +440,7 @@ One primitive with two execution contexts:
 
 ### Batch / CLI
 
-- reads bound inputs from disk (CSV, row-oriented JSON, JSONL, and Parquet)
+- reads bound inputs from disk (CSV, row-oriented JSON, JSONL, Parquet, and Excel worksheets; see below)
 - evaluates portable and batch-only rules
 - loads every named relation once into one in-memory `BatchContext`
 - materializes only the columns portable rules read, so a column no rule

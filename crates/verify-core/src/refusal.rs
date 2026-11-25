@@ -52,7 +52,9 @@ impl RefusalCode {
             Self::DuplicateBinding => "Remove duplicate `--bind` inputs.",
             Self::MissingBinding => "Add the missing `--bind`.",
             Self::UndeclaredBinding => "Remove or rename the extra `--bind`.",
-            Self::FormatDetect => "Use CSV, JSON, JSONL, or Parquet.",
+            Self::FormatDetect => {
+                "Use CSV, JSON, JSONL, Parquet, or Excel (pick a sheet with NAME=book.xlsx#Sheet)."
+            }
             Self::FieldNotFound => {
                 "Fix the constraint set or bind an input that exposes the required field."
             }

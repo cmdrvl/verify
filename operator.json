@@ -51,7 +51,7 @@
       "name": "bind",
       "flag": "--bind",
       "type": "NAME=PATH",
-      "description": "Bind a declared relation name to an already-canonical CSV, JSON, JSONL, or Parquet file"
+      "description": "Bind a declared relation name to an already-canonical CSV, JSON, JSONL, or Parquet file, or to one Excel worksheet (NAME=book.xlsx#Sheet, by name or 0-based index; a workbook with several sheets and no selector refuses)"
     },
     {
       "name": "lock",
@@ -339,7 +339,7 @@
     },
     {
       "code": "E_FORMAT_DETECT",
-      "message": "Bound input is not CSV, JSON, JSONL or Parquet",
+      "message": "Bound input is not CSV, JSON, JSONL, Parquet or Excel, or an Excel workbook has no usable sheet selection",
       "action": "use_supported_format"
     },
     {
@@ -424,7 +424,7 @@
     }
   ],
 
-  "formats": ["csv", "json", "jsonl", "parquet"],
+  "formats": ["csv", "json", "jsonl", "parquet", "xlsx", "xlsm", "xls"],
 
   "side_effects": {
     "reads_files": true,

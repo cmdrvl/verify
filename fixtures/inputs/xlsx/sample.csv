@@ -1,0 +1,4 @@
+id,region,amount,active,note
+1,East,100.5,true,NA
+2,West,2000,false,NULL
+3, North ,0.1,true,

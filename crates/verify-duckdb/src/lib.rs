@@ -5,6 +5,7 @@ pub mod bindings;
 pub mod lock_check;
 pub mod query_rules;
 pub mod scalar;
+pub mod xlsx;
 
 use duckdb::Connection;
 use verify_core::constraint::ConstraintSet;

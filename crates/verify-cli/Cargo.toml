@@ -24,6 +24,10 @@ name = "redaction"
 path = "../../tests/redaction.rs"
 
 [[test]]
+name = "xlsx_bindings"
+path = "../../tests/xlsx_bindings.rs"
+
+[[test]]
 name = "doctor"
 path = "../../tests/doctor.rs"
 

@@ -722,7 +722,13 @@ fn parse_bind_args(binds: &[String]) -> Result<Vec<BatchBindingInput>, String> {
             let (name, path) = bind
                 .split_once('=')
                 .ok_or_else(|| format!("invalid --bind: expected NAME=PATH, got: {bind}"))?;
-            Ok(BatchBindingInput::new(name, path))
+            // `NAME=report.xlsx#Sheet1` picks a worksheet; other paths are used as written.
+            let (path, sheet) = verify_duckdb::xlsx::split_sheet_selector(path);
+            let input = BatchBindingInput::new(name, path);
+            Ok(match sheet {
+                Some(sheet) => input.with_sheet(sheet),
+                None => input,
+            })
         })
         .collect()
 }

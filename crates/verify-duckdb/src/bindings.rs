@@ -14,7 +14,8 @@ use verify_core::{
     report::BindingReport,
 };
 
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["csv", "json", "jsonl", "parquet"];
+pub const SUPPORTED_EXTENSIONS: &[&str] =
+    &["csv", "json", "jsonl", "parquet", "xlsx", "xlsm", "xls"];
 const CSV_NULL_SENTINEL: &str = "__VERIFY_NULL_SENTINEL__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub enum BindingFormat {
     Json,
     Jsonl,
     Parquet,
+    /// An Excel worksheet, read through `cmdrvl-tabular` and loaded as CSV.
+    Xlsx,
 }
 
 impl BindingFormat {
@@ -37,6 +40,7 @@ impl BindingFormat {
             Some("json") => Ok(Self::Json),
             Some("jsonl") => Ok(Self::Jsonl),
             Some("parquet") => Ok(Self::Parquet),
+            Some("xlsx" | "xlsm" | "xls") => Ok(Self::Xlsx),
             _ => Err(BatchBindingError::FormatDetect {
                 binding: String::new(),
                 path: path.to_path_buf(),
@@ -53,7 +57,8 @@ impl BindingFormat {
         let escaped_path = sql_string_literal(path);
 
         match self {
-            Self::Csv => format!(
+            // An Excel binding is loaded from the CSV written for the selected worksheet.
+            Self::Csv | Self::Xlsx => format!(
                 "CREATE TEMP TABLE {relation_name} AS SELECT * FROM read_csv_auto('{escaped_path}', nullstr='{CSV_NULL_SENTINEL}');"
             ),
             Self::Json => format!(
@@ -73,6 +78,8 @@ impl BindingFormat {
 pub struct BatchBindingInput {
     pub name: String,
     pub path: PathBuf,
+    /// Worksheet name or 0-based index, for Excel workbooks only.
+    pub sheet: Option<String>,
 }
 
 impl BatchBindingInput {
@@ -80,7 +87,13 @@ impl BatchBindingInput {
         Self {
             name: name.into(),
             path: path.into(),
+            sheet: None,
         }
+    }
+
+    pub fn with_sheet(mut self, sheet: impl Into<String>) -> Self {
+        self.sheet = Some(sheet.into());
+        self
     }
 }
 
@@ -427,17 +440,23 @@ pub fn load_binding_registry(
             });
         }
 
-        supplied.insert(input.name, input.path);
+        supplied.insert(input.name, (input.path, input.sheet));
     }
 
     let mut bindings = BTreeMap::new();
     for declared_binding in &constraints.bindings {
-        let path = supplied
+        let (path, sheet) = supplied
             .remove(declared_binding.name.as_str())
             .ok_or_else(|| BatchBindingError::MissingBinding {
                 binding: declared_binding.name.clone(),
             })?;
-        let loaded = load_single_binding(connection, declared_binding.clone(), path, limits)?;
+        let loaded = load_single_binding(
+            connection,
+            declared_binding.clone(),
+            path,
+            sheet.as_deref(),
+            limits,
+        )?;
         bindings.insert(declared_binding.name.clone(), loaded);
     }
 
@@ -448,6 +467,7 @@ fn load_single_binding(
     connection: &Connection,
     declared: Binding,
     path: PathBuf,
+    sheet: Option<&str>,
     limits: BatchBindingLimits,
 ) -> Result<LoadedBinding, BatchBindingError> {
     let metadata = fs::metadata(&path).map_err(|source| BatchBindingError::Io {
@@ -486,7 +506,25 @@ fn load_single_binding(
         other => other,
     })?;
 
-    let load_sql = format.create_sql(&declared.name, &path);
+    if sheet.is_some() && format != BindingFormat::Xlsx {
+        return Err(BatchBindingError::FormatDetect {
+            binding: declared.name.clone(),
+            path: path.clone(),
+            detail: "a sheet selector applies only to .xlsx, .xlsm and .xls inputs".to_owned(),
+        });
+    }
+
+    // For a workbook, the selected worksheet is written to this temp CSV (removed on drop,
+    // after the table is created) and DuckDB loads it like any CSV.
+    let worksheet_csv = if format == BindingFormat::Xlsx {
+        Some(crate::xlsx::to_temp_csv(&declared.name, &path, sheet)?)
+    } else {
+        None
+    };
+    let load_path = worksheet_csv
+        .as_ref()
+        .map_or(path.as_path(), |file| file.path());
+    let load_sql = format.create_sql(&declared.name, load_path);
     connection
         .execute_batch(&load_sql)
         .map_err(|source| BatchBindingError::Load {
