@@ -239,7 +239,10 @@ fn load_records_from_path(path: &Path) -> Result<Vec<Value>, String> {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
-            return Err(format!("verify: witness: failed to read ledger: {error}"));
+            return Err(format!(
+                "verify: witness: failed to read ledger {}: {error}",
+                path.display()
+            ));
         }
     };
 
@@ -248,7 +251,17 @@ fn load_records_from_path(path: &Path) -> Result<Vec<Value>, String> {
         let line = match line {
             Ok(line) if !line.trim().is_empty() => line,
             Ok(_) => continue,
-            Err(_) => continue,
+            // A line that is not valid UTF-8 is consumed by the reader, so skipping it is safe
+            // and matches how malformed JSON lines are treated. Any other read error (a
+            // directory, a permission or device failure) repeats on every call, so continuing
+            // here spins forever: return it instead.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(error) => {
+                return Err(format!(
+                    "verify: witness: failed to read ledger {}: {error}",
+                    path.display()
+                ));
+            }
         };
 
         let Ok(record) = serde_json::from_str::<Value>(&line) else {

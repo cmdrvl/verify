@@ -292,6 +292,94 @@ fn witness_query_last_and_count_read_appended_records() {
     assert_eq!(count_record["count"], 2);
 }
 
+/// Runs `verify witness <action> --json` as a child with a hard timeout. `None` means the child
+/// did not exit within the limit and was killed (the pre-fix behaviour on a directory ledger).
+fn witness_with_timeout(ledger: &std::path::Path, action: &str) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = verify_command()
+        .env("EPISTEMIC_WITNESS", ledger)
+        .args(["witness", action, "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("witness should spawn");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return Some(child.wait_with_output().expect("collect output"));
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill hung witness child");
+            child.wait().expect("reap killed child");
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn witness_with_a_directory_ledger_refuses_fast_instead_of_spinning() {
+    let ledger = TestLedger::new("witness-directory");
+    let directory = ledger.root.join("a_directory");
+    fs::create_dir_all(&directory).expect("directory ledger should be created");
+
+    for action in ["query", "last", "count"] {
+        let output = witness_with_timeout(&directory, action);
+        assert!(
+            output.is_some(),
+            "witness {action} hung on a directory ledger"
+        );
+        let output = output.expect("checked above");
+        assert_eq!(output.status.code(), Some(2), "witness {action}");
+        assert!(output.stdout.is_empty(), "witness {action} printed stdout");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&directory.display().to_string()),
+            "witness {action} stderr must name the path: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn witness_with_empty_or_absent_ledger_still_exits_zero() {
+    let ledger = TestLedger::new("witness-empty");
+    let absent = ledger.root.join("absent.jsonl");
+    let empty = ledger.root.join("empty.jsonl");
+    fs::write(&empty, "").expect("empty ledger should write");
+
+    for path in [&absent, &empty] {
+        let query = witness_with_timeout(path, "query").expect("query should not hang");
+        assert_eq!(query.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&query.stdout).trim(), "[]");
+        let last = witness_with_timeout(path, "last").expect("last should not hang");
+        assert_eq!(last.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&last.stdout).trim(), "null");
+        let count = witness_with_timeout(path, "count").expect("count should not hang");
+        assert_eq!(count.status.code(), Some(0));
+        let count: Value = serde_json::from_slice(&count.stdout).expect("count json");
+        assert_eq!(count["count"], 0);
+    }
+}
+
+#[test]
+fn witness_skips_a_non_utf8_line_but_keeps_reading() {
+    let ledger = TestLedger::new("witness-non-utf8");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"{\"tool\":\"verify\",\"command\":\"run\",\"outcome\":\"PASS\"}\n");
+    bytes.extend_from_slice(&[0xff, 0xfe, b'\n']);
+    bytes
+        .extend_from_slice(b"{\"tool\":\"verify\",\"command\":\"compile\",\"outcome\":\"PASS\"}\n");
+    fs::write(&ledger.path, bytes).expect("ledger should write");
+
+    let output = witness_with_timeout(&ledger.path, "count").expect("count should not hang");
+    assert_eq!(output.status.code(), Some(0));
+    let count: Value = serde_json::from_slice(&output.stdout).expect("count json");
+    assert_eq!(count["count"], 2);
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end PASS / FAIL / shortcut tests
 // ---------------------------------------------------------------------------
