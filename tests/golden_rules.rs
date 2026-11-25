@@ -29,4 +29,15 @@ golden_rules_suite! {
     ],
     // A valid query that matches nothing, whatever the machine's real ledger holds.
     fixture_empty_query_args: &["witness", "query", "--json", "--command", "no-such-command"],
+    // Zero-retention: a rule that fails every row of a canary-seeded input must print no
+    // raw key or cell value unless --explicit is passed.
+    fixture_canary_args: &[
+        "run",
+        "../../fixtures/constraints/redaction/canary_query.verify.json",
+        "--bind",
+        "input=../../fixtures/inputs/redaction/canary.csv",
+        "--json",
+        "--no-witness",
+    ],
+    fixture_canaries: &["CANARY-LOAN-0f3a91", "CANARY-CELL-77c2d4"],
 }
