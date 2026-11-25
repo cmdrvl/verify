@@ -9,7 +9,12 @@ use verify_core::{
 
 use crate::BindingRegistry;
 
-const LOCK_VERSION: &str = "lock.input.v1";
+/// Canonical lockfile version emitted by the `lock` tool: `members[].bytes_hash`
+/// is `<algorithm>:<hex>` of the raw file bytes, with `sha256` and `blake3` supported.
+const LOCK_V0: &str = "lock.v0";
+/// Deprecated verify-private format (`members[].content_hash`, sha256 only). Kept so
+/// existing fixtures and any lock written for it keep working; real locks are `lock.v0`.
+const LEGACY_LOCK_VERSION: &str = "lock.input.v1";
 
 #[derive(Debug, Clone, Deserialize)]
 struct LockFile {
@@ -20,7 +25,60 @@ struct LockFile {
 #[derive(Debug, Clone, Deserialize)]
 struct LockMember {
     path: String,
-    content_hash: String,
+    #[serde(default)]
+    bytes_hash: Option<String>,
+    #[serde(default)]
+    content_hash: Option<String>,
+}
+
+/// Hash algorithms a lock member may name. Anything else is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HashAlgorithm {
+    Sha256,
+    Blake3,
+}
+
+impl HashAlgorithm {
+    fn of(hash: &str) -> Option<Self> {
+        match hash.split_once(':')?.0 {
+            "sha256" => Some(Self::Sha256),
+            "blake3" => Some(Self::Blake3),
+            _ => None,
+        }
+    }
+
+    /// `<algorithm>:<lowercase hex>` of the file at `path`, streamed.
+    fn digest_file(self, path: &std::path::Path) -> std::io::Result<String> {
+        use std::io::Read;
+
+        let mut file = fs::File::open(path)?;
+        let mut buffer = [0_u8; 64 * 1024];
+        match self {
+            Self::Sha256 => {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                }
+                Ok(format!("sha256:{:x}", hasher.finalize()))
+            }
+            Self::Blake3 => {
+                let mut hasher = blake3::Hasher::new();
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                }
+                Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,14 +196,59 @@ impl std::fmt::Display for LockError {
 
 impl std::error::Error for LockError {}
 
-/// Loaded lock data: maps normalized source paths to their expected content hashes
-/// and tracks which lock files contributed each member.
+/// One locked member with the lock file it came from.
+#[derive(Debug, Clone)]
+struct LockedMember {
+    /// Normalized member path as written in the lock.
+    path: String,
+    /// `<algorithm>:<hex>` the lock expects (`bytes_hash`, or legacy `content_hash`).
+    expected_hash: String,
+    lock_name: String,
+    lock_path: PathBuf,
+}
+
+/// Loaded lock data across every `--lock` file.
 #[derive(Debug, Clone)]
 struct LoadedLock {
-    /// Normalized path -> (expected content_hash, lock file source name)
-    members: BTreeMap<String, (String, String)>,
+    members: Vec<LockedMember>,
     /// Names of all lock files that were loaded.
     lock_names: Vec<String>,
+}
+
+impl LoadedLock {
+    /// Members that vouch for `normalized_path`: an exact path match wins, otherwise a
+    /// unique basename match (real `lock` output stores paths relative to the vacuum
+    /// root, so basename matching is the normal case). An ambiguous basename matches
+    /// nothing, because it cannot be verified safely. Same rule as shape, rvl, benchmark.
+    fn candidates(&self, normalized_path: &str) -> Vec<&LockedMember> {
+        let exact: Vec<&LockedMember> = self
+            .members
+            .iter()
+            .filter(|member| member.path == normalized_path)
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        let basename = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
+        let wanted = basename(normalized_path);
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        let by_basename: Vec<&LockedMember> = self
+            .members
+            .iter()
+            .filter(|member| basename(&member.path) == wanted)
+            .collect();
+        let distinct_paths: std::collections::BTreeSet<&str> = by_basename
+            .iter()
+            .map(|member| member.path.as_str())
+            .collect();
+        if distinct_paths.len() == 1 {
+            by_basename
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// Verify all bindings in a registry against the provided lock files.
@@ -168,41 +271,72 @@ pub fn verify_locks(
         let source_path = normalize_path(&binding.source_path().to_string_lossy());
         let content_hash = &binding.metadata().content_hash;
 
-        match loaded.members.get(&source_path) {
-            Some((expected_hash, _lock_source)) => {
-                if expected_hash != content_hash {
-                    return Err(LockError::InputDrift {
-                        binding: name.to_owned(),
-                        source_path,
-                        expected_hash: expected_hash.clone(),
-                        observed_hash: content_hash.clone(),
-                    });
-                }
+        let candidates = loaded.candidates(&source_path);
+        if candidates.is_empty() {
+            return Err(LockError::InputNotLocked {
+                binding: name.to_owned(),
+                source_path,
+                locks_checked: loaded.lock_names.clone(),
+            });
+        }
 
-                let contributing_locks = locks_containing(&loaded, &source_path);
-                verifications.insert(
-                    name.to_owned(),
-                    InputVerification {
-                        status: InputVerificationStatus::Verified,
-                        locks: contributing_locks,
-                    },
-                );
-            }
-            None => {
-                return Err(LockError::InputNotLocked {
-                    binding: name.to_owned(),
-                    source_path,
-                    locks_checked: loaded.lock_names.clone(),
+        let mut vouching_locks: Vec<String> = Vec::new();
+        let mut first_drift: Option<(String, String)> = None;
+        for member in candidates {
+            let Some(algorithm) = HashAlgorithm::of(&member.expected_hash) else {
+                return Err(LockError::BadLock {
+                    path: member.lock_path.clone(),
+                    detail: format!(
+                        "unsupported hash algorithm in '{}' for member {}; expected sha256: or blake3:",
+                        member.expected_hash, member.path
+                    ),
                 });
+            };
+            // The binding already carries the sha256 of its bytes; anything else is
+            // computed from the same file the binding was loaded from.
+            let observed = if algorithm == HashAlgorithm::Sha256 {
+                content_hash.clone()
+            } else {
+                algorithm
+                    .digest_file(binding.source_path())
+                    .map_err(|error| LockError::Io {
+                        path: binding.source_path().to_path_buf(),
+                        detail: error.to_string(),
+                    })?
+            };
+            if observed == member.expected_hash {
+                if !vouching_locks.contains(&member.lock_name) {
+                    vouching_locks.push(member.lock_name.clone());
+                }
+            } else if first_drift.is_none() {
+                first_drift = Some((member.expected_hash.clone(), observed));
             }
         }
+
+        if vouching_locks.is_empty() {
+            let (expected_hash, observed_hash) =
+                first_drift.expect("a non-empty candidate set that never matched drifted");
+            return Err(LockError::InputDrift {
+                binding: name.to_owned(),
+                source_path,
+                expected_hash,
+                observed_hash,
+            });
+        }
+        verifications.insert(
+            name.to_owned(),
+            InputVerification {
+                status: InputVerificationStatus::Verified,
+                locks: vouching_locks,
+            },
+        );
     }
 
     Ok(verifications)
 }
 
 fn load_locks(paths: &[PathBuf]) -> Result<LoadedLock, LockError> {
-    let mut members = BTreeMap::new();
+    let mut members = Vec::new();
     let mut lock_names = Vec::new();
 
     for path in paths {
@@ -222,19 +356,41 @@ fn load_locks(paths: &[PathBuf]) -> Result<LoadedLock, LockError> {
                 detail: error.to_string(),
             })?;
 
-        if lock_file.version != LOCK_VERSION {
-            return Err(LockError::BadLock {
-                path: path.clone(),
-                detail: format!(
-                    "unsupported lock version: expected {LOCK_VERSION}, got {}",
-                    lock_file.version
-                ),
-            });
-        }
+        let legacy = match lock_file.version.as_str() {
+            LOCK_V0 => false,
+            LEGACY_LOCK_VERSION => true,
+            other => {
+                return Err(LockError::BadLock {
+                    path: path.clone(),
+                    detail: format!(
+                        "unsupported lock version: expected {LOCK_V0} (or deprecated {LEGACY_LOCK_VERSION}), got {other}"
+                    ),
+                });
+            }
+        };
 
         for member in lock_file.members {
-            let normalized = normalize_path(&member.path);
-            members.insert(normalized, (member.content_hash, lock_name.clone()));
+            let expected = if legacy {
+                member.content_hash
+            } else {
+                member.bytes_hash
+            };
+            let Some(expected_hash) = expected else {
+                return Err(LockError::BadLock {
+                    path: path.clone(),
+                    detail: format!(
+                        "member {} has no {}",
+                        member.path,
+                        if legacy { "content_hash" } else { "bytes_hash" }
+                    ),
+                });
+            };
+            members.push(LockedMember {
+                path: normalize_path(&member.path),
+                expected_hash,
+                lock_name: lock_name.clone(),
+                lock_path: path.clone(),
+            });
         }
 
         lock_names.push(lock_name);
@@ -244,15 +400,6 @@ fn load_locks(paths: &[PathBuf]) -> Result<LoadedLock, LockError> {
         members,
         lock_names,
     })
-}
-
-/// Collect the names of all lock files that contain a given path.
-fn locks_containing(loaded: &LoadedLock, normalized_path: &str) -> Vec<String> {
-    if let Some((_, lock_name)) = loaded.members.get(normalized_path) {
-        vec![lock_name.clone()]
-    } else {
-        Vec::new()
-    }
 }
 
 /// Normalize a path string for lock membership matching.

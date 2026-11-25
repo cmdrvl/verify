@@ -412,6 +412,10 @@ FAIL INPUT_LOAN_ID_PRESENT binding=input key.loan_id=LN-42 field=loan_id value=n
 
 When a failing rule has many localized rows, `--sample-affected <N>` limits the human output to the first `N` affected entries per failing rule and adds a preview note when additional entries were omitted. JSON output is unchanged.
 
+### Input locks (`--lock`)
+
+`--lock <LOCKFILE>` (repeatable) checks each bound input against a lockfile before any rule runs. It reads the canonical `lock.v0` manifest that `vacuum | hashbytes | lock` writes: each `members[].bytes_hash` is `sha256:<hex>` or `blake3:<hex>` of the raw file bytes, and verify hashes the bound file with the member's own algorithm. A member matches by exact path, otherwise by a unique basename (real locks store paths relative to the vacuum root); an ambiguous basename counts as not locked. Different bytes refuse with `E_INPUT_DRIFT`, a bound input with no member refuses with `E_INPUT_NOT_LOCKED`, and an unknown hash algorithm, a member with no `bytes_hash`, or an unknown lock version refuses with `E_IO` (exit 2). The old verify-private `lock.input.v1` format (`content_hash`, sha256 only) is still read and is deprecated. Not checked: the lock's own `lock_hash` self-hash.
+
 ### Redaction (`--explicit`)
 
 Default `verify run` output is redacted: the raw key values and cell values of failing rows are replaced by opaque, deterministic tokens (`redacted:sha256:<16 hex>`), so a failing rule cannot print bound data into a log or a model's context. Rule ids, severities, counts, binding names, key column names, field names, and the JSON shape are unchanged. DuckDB error text on a `SQL_ERROR` refusal (which can quote the offending cell) is withheld too. Pass `--explicit` to get the raw values back, for example `verify run c.verify.json --bind input=data.csv --json --explicit`.

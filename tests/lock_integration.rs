@@ -177,3 +177,142 @@ fn fixture_lock_verification_reports_input_drift() -> Result<(), Box<dyn Error>>
     cleanup(&lock_path);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Canonical lock.v0 (bd-pnr). The two lock files under fixtures/locks/lock_v0 are
+// REAL output of the installed `vacuum data | hashbytes --algorithm <alg> | lock`
+// pipeline over loans.csv in that directory, not hand-written JSON.
+// ---------------------------------------------------------------------------
+
+fn lock_v0_fixture(file: &str) -> PathBuf {
+    fixture_path("locks/lock_v0").join(file)
+}
+
+fn context_for(path: &Path) -> Result<verify_duckdb::BatchContext, Box<dyn Error>> {
+    Ok(prepare_batch_context(
+        &load_constraints()?,
+        vec![BatchBindingInput::new("input", path)],
+        BatchBindingLimits::default(),
+    )?)
+}
+
+/// A copy of the locked CSV with one byte changed, in its own scratch dir, still named loans.csv.
+fn tampered_loans_csv(stem: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let dir = std::env::temp_dir().join(format!(
+        "verify-{stem}-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("loans.csv");
+    let original = fs::read_to_string(lock_v0_fixture("loans.csv"))?;
+    fs::write(&path, original.replace("LN-2,20", "LN-2,21"))?;
+    Ok(path)
+}
+
+#[test]
+fn real_lock_v0_verifies_with_sha256_and_blake3_bytes_hash() -> Result<(), Box<dyn Error>> {
+    for lock_file in ["sha256.lock.json", "blake3.lock.json"] {
+        let lock = fs::read_to_string(lock_v0_fixture(lock_file))?;
+        assert!(lock.contains("\"version\":\"lock.v0\""), "{lock_file}");
+        let context = context_for(&lock_v0_fixture("loans.csv"))?;
+        let result = verify_locks(&[lock_v0_fixture(lock_file)], context.bindings())
+            .map_err(|error| format!("{lock_file} should verify: {error}"))?;
+        let verification = result.get("input").expect("input verified");
+        assert_eq!(verification.status, InputVerificationStatus::Verified);
+        assert_eq!(verification.locks, vec![lock_file.to_owned()]);
+    }
+    Ok(())
+}
+
+#[test]
+fn real_lock_v0_refuses_tampered_bytes_with_the_locks_own_algorithm() -> Result<(), Box<dyn Error>>
+{
+    let tampered = tampered_loans_csv("tampered")?;
+    for (lock_file, prefix) in [
+        ("sha256.lock.json", "sha256:"),
+        ("blake3.lock.json", "blake3:"),
+    ] {
+        let context = context_for(&tampered)?;
+        let refusal = verify_locks(&[lock_v0_fixture(lock_file)], context.bindings())
+            .expect_err("tampered bytes must be refused")
+            .to_refusal();
+        assert_eq!(refusal.code, RefusalCode::InputDrift, "{lock_file}");
+        let expected = refusal.detail["expected_hash"].as_str().expect("expected");
+        let observed = refusal.detail["observed_hash"].as_str().expect("observed");
+        assert!(expected.starts_with(prefix) && observed.starts_with(prefix));
+        assert_ne!(expected, observed);
+    }
+    Ok(())
+}
+
+#[test]
+fn lock_v0_with_an_unknown_hash_algorithm_is_refused_deterministically()
+-> Result<(), Box<dyn Error>> {
+    let real = fs::read_to_string(lock_v0_fixture("sha256.lock.json"))?;
+    let lock_path = unique_lock_path("md5");
+    let forged = real.replace("sha256:973ef89c", "md5:973ef89c");
+    assert_ne!(real, forged, "the fixture's hash prefix changed upstream");
+    fs::write(&lock_path, forged)?;
+
+    let context = context_for(&lock_v0_fixture("loans.csv"))?;
+    let refusal = verify_locks(std::slice::from_ref(&lock_path), context.bindings())
+        .expect_err("unknown algorithm must be refused")
+        .to_refusal();
+    assert_eq!(refusal.code, RefusalCode::Io);
+    assert!(
+        refusal.detail["detail"]
+            .as_str()
+            .is_some_and(|text| text.contains("unsupported hash algorithm")),
+        "{refusal:?}"
+    );
+    cleanup(&lock_path);
+    Ok(())
+}
+
+#[test]
+fn lock_v0_member_without_bytes_hash_and_unknown_versions_are_refused() -> Result<(), Box<dyn Error>>
+{
+    let context = context_for(&lock_v0_fixture("loans.csv"))?;
+    for (stem, body) in [
+        (
+            "nohash",
+            r#"{"version":"lock.v0","members":[{"path":"loans.csv"}]}"#,
+        ),
+        ("v9", r#"{"version":"lock.v9","members":[]}"#),
+    ] {
+        let lock_path = unique_lock_path(stem);
+        fs::write(&lock_path, body)?;
+        let refusal = verify_locks(std::slice::from_ref(&lock_path), context.bindings())
+            .expect_err("must refuse")
+            .to_refusal();
+        assert_eq!(refusal.code, RefusalCode::Io, "{stem}");
+        cleanup(&lock_path);
+    }
+    Ok(())
+}
+
+#[test]
+fn two_members_with_the_same_basename_are_not_locked_rather_than_guessed()
+-> Result<(), Box<dyn Error>> {
+    let real: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(lock_v0_fixture("sha256.lock.json"))?)?;
+    let member = real["members"][0].clone();
+    let mut a = member.clone();
+    a["path"] = json!("a/loans.csv");
+    let mut b = member;
+    b["path"] = json!("b/loans.csv");
+    let lock_path = unique_lock_path("ambiguous");
+    fs::write(
+        &lock_path,
+        json!({"version": "lock.v0", "members": [a, b]}).to_string(),
+    )?;
+
+    let context = context_for(&lock_v0_fixture("loans.csv"))?;
+    let refusal = verify_locks(std::slice::from_ref(&lock_path), context.bindings())
+        .expect_err("ambiguous basename must not verify")
+        .to_refusal();
+    assert_eq!(refusal.code, RefusalCode::InputNotLocked);
+    cleanup(&lock_path);
+    Ok(())
+}

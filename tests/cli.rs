@@ -1076,3 +1076,58 @@ fn sql_error_text_that_quotes_a_cell_is_redacted_by_default() {
         assert!(!text.contains(CANARY_KEY), "{text}");
     }
 }
+
+#[test]
+fn run_lock_accepts_real_lock_v0_blake3_and_sha256_and_refuses_stale_input() {
+    let constraints = fixture("fixtures/constraints/arity1/not_null_loans.verify.json");
+    let loans = fixture("fixtures/locks/lock_v0/loans.csv");
+    for lock_file in ["sha256.lock.json", "blake3.lock.json"] {
+        let lock = fixture(&format!("fixtures/locks/lock_v0/{lock_file}"));
+        let output = verify_command()
+            .args([
+                "run",
+                &constraints,
+                "--bind",
+                &format!("input={loans}"),
+                "--lock",
+                &lock,
+                "--json",
+                "--no-witness",
+            ])
+            .output()
+            .expect("verify run should execute");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{lock_file}: {}",
+            combined(&output)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("json report");
+        assert_eq!(report["outcome"], "PASS", "{lock_file}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(lock_file),
+            "the report should name the vouching lock {lock_file}"
+        );
+
+        // Stale input: same name, different bytes.
+        let ledger = TestLedger::new("stale-lock");
+        let stale = ledger.root.join("loans.csv");
+        fs::write(&stale, "loan_id,balance\nLN-1,10\nLN-2,21\n").expect("write stale csv");
+        let output = verify_command()
+            .args([
+                "run",
+                &constraints,
+                "--bind",
+                &format!("input={}", stale.display()),
+                "--lock",
+                &lock,
+                "--json",
+                "--no-witness",
+            ])
+            .output()
+            .expect("verify run should execute");
+        assert_eq!(output.status.code(), Some(2), "{lock_file}");
+        let report: Value = serde_json::from_slice(&output.stdout).expect("json refusal");
+        assert_eq!(report["refusal"]["code"], "E_INPUT_DRIFT", "{lock_file}");
+    }
+}
