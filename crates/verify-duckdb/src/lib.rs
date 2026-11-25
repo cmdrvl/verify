@@ -135,8 +135,8 @@ mod lockdown_tests {
         connection
     }
 
-    fn write_secret(scratch: &Scratch) -> PathBuf {
-        let path = scratch.path("secret.csv");
+    fn write_canary_csv(scratch: &Scratch) -> PathBuf {
+        let path = scratch.path("canary.csv");
         fs::write(&path, "id,secret\n1,CANARY-7c1f\n").expect("write secret");
         path
     }
@@ -144,8 +144,11 @@ mod lockdown_tests {
     #[test]
     fn host_files_are_readable_unlocked_and_unreachable_locked() {
         let scratch = Scratch::new("read");
-        let secret = write_secret(&scratch);
-        let read = format!("SELECT secret FROM read_csv_auto('{}')", quoted(&secret));
+        let canary_path = write_canary_csv(&scratch);
+        let read = format!(
+            "SELECT secret FROM read_csv_auto('{}')",
+            quoted(&canary_path)
+        );
 
         // Control: the same statement works on an unlocked connection, so a refusal
         // below is the lock's doing and not a typo in the test.
@@ -158,9 +161,9 @@ mod lockdown_tests {
         let locked = locked();
         for statement in [
             read.clone(),
-            format!("SELECT * FROM read_csv('{}')", quoted(&secret)),
-            format!("SELECT * FROM '{}'", quoted(&secret)),
-            format!("SELECT * FROM read_text('{}')", quoted(&secret)),
+            format!("SELECT * FROM read_csv('{}')", quoted(&canary_path)),
+            format!("SELECT * FROM '{}'", quoted(&canary_path)),
+            format!("SELECT * FROM read_text('{}')", quoted(&canary_path)),
             format!("SELECT * FROM glob('{}/*')", quoted(&scratch.0)),
         ] {
             let error = locked
@@ -215,7 +218,7 @@ mod lockdown_tests {
     #[test]
     fn configuration_cannot_be_undone_after_the_lock() {
         let scratch = Scratch::new("config");
-        let secret = write_secret(&scratch);
+        let canary_path = write_canary_csv(&scratch);
         let locked = locked();
 
         assert!(
@@ -240,7 +243,7 @@ mod lockdown_tests {
             locked
                 .execute_batch(&format!(
                     "CREATE TEMP TABLE leak AS SELECT * FROM read_csv_auto('{}')",
-                    quoted(&secret)
+                    quoted(&canary_path)
                 ))
                 .is_err()
         );
