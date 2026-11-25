@@ -503,7 +503,7 @@ fn run_pass_appends_pass_witness_record() {
 }
 
 #[test]
-fn witness_empty_ledger_reports_no_match() {
+fn witness_empty_ledger_is_success_with_a_zero_count() {
     let ledger = TestLedger::new("witness-empty");
 
     let output = verify_command_with_ledger(&ledger)
@@ -511,13 +511,14 @@ fn witness_empty_ledger_reports_no_match() {
         .output()
         .expect("witness count should run");
 
-    assert_eq!(output.status.code(), Some(1));
+    // Family contract: an empty read is exit 0 (it was exit 1 before 0.5.2).
+    assert_eq!(output.status.code(), Some(0));
     let stdout: Value =
         serde_json::from_slice(&output.stdout).expect("count output should be valid json");
     assert_eq!(stdout["count"], 0);
     assert_eq!(
         String::from_utf8_lossy(&output.stderr).trim(),
-        "verify: no witness records found"
+        "verify: no witness records matched"
     );
 }
 

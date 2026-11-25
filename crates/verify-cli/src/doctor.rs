@@ -4,11 +4,28 @@ use verify_core::{CONSTRAINT_VERSION, REPORT_VERSION, TOOL_NAME};
 
 use crate::{paths, render, witness};
 
-const TOP_LEVEL_CAPABILITIES_SCHEMA: &str = "verify.capabilities.v1";
-const HEALTH_SCHEMA: &str = "verify.doctor.health.v1";
-const CAPABILITIES_SCHEMA: &str = "verify.doctor.capabilities.v1";
-const TRIAGE_SCHEMA: &str = "verify.doctor.triage.v1";
+/// Family doctor schema (spine-rules `cmdrvl.doctor.v1`). Replaces the old
+/// per-tool `verify.doctor.{health,capabilities,triage}.v1` and
+/// `verify.capabilities.v1` ids; consumers key on `schema_version`.
+const DOCTOR_SCHEMA: &str = "cmdrvl.doctor.v1";
 const DOCTOR_CONTRACT: &str = "cmdrvl.read_only_doctor.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Health,
+    Capabilities,
+    Triage,
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Health => "health",
+            Self::Capabilities => "capabilities",
+            Self::Triage => "triage",
+        }
+    }
+}
 
 const SIDE_EFFECTS: &[&str] = &[
     "reads_stdin",
@@ -44,6 +61,8 @@ pub struct DoctorArgs {
 pub enum DoctorAction {
     Health(DoctorJsonArgs),
     Capabilities(DoctorJsonArgs),
+    /// Canonical spelling of the triage report (`--robot-triage` stays as an alias).
+    Triage(DoctorJsonArgs),
     RobotDocs,
 }
 
@@ -102,16 +121,25 @@ impl Diagnostics {
         if self.ok() { "healthy" } else { "unhealthy" }
     }
 
+    /// Family contract: `0` healthy, `1` unhealthy. `2` is reserved for
+    /// CLI/usage errors and is never returned for a parsed unhealthy report.
     fn exit_code(&self) -> u8 {
-        if self.ok() { 0 } else { 2 }
+        if self.ok() { 0 } else { 1 }
     }
 }
 
 pub fn execute(args: DoctorArgs) -> DoctorCommandResult {
-    let diagnostics = collect_diagnostics();
+    render(args, &collect_diagnostics())
+}
 
+/// Turn diagnostics into the requested output and exit code. Split from
+/// `execute` so an unhealthy run can be exercised without breaking the install.
+fn render(args: DoctorArgs, diagnostics: &Diagnostics) -> DoctorCommandResult {
     if args.robot_triage {
-        return json_result(robot_triage_value(&diagnostics), diagnostics.exit_code());
+        return json_result(
+            report_value(Mode::Triage, diagnostics),
+            diagnostics.exit_code(),
+        );
     }
 
     let action = args
@@ -121,16 +149,32 @@ pub fn execute(args: DoctorArgs) -> DoctorCommandResult {
     match action {
         DoctorAction::Health(format) => {
             if args.json || format.json {
-                json_result(health_value(&diagnostics), diagnostics.exit_code())
+                json_result(
+                    report_value(Mode::Health, diagnostics),
+                    diagnostics.exit_code(),
+                )
             } else {
-                text_result(human_health(&diagnostics), diagnostics.exit_code())
+                text_result(human_health(diagnostics), diagnostics.exit_code())
             }
         }
         DoctorAction::Capabilities(format) => {
             if args.json || format.json {
-                json_result(capabilities_value(), 0)
+                json_result(
+                    report_value(Mode::Capabilities, diagnostics),
+                    diagnostics.exit_code(),
+                )
             } else {
-                text_result(human_capabilities(), 0)
+                text_result(human_capabilities(), diagnostics.exit_code())
+            }
+        }
+        DoctorAction::Triage(format) => {
+            if args.json || format.json {
+                json_result(
+                    report_value(Mode::Triage, diagnostics),
+                    diagnostics.exit_code(),
+                )
+            } else {
+                text_result(human_health(diagnostics), diagnostics.exit_code())
             }
         }
         DoctorAction::RobotDocs => text_result(robot_docs(), 0),
@@ -139,13 +183,17 @@ pub fn execute(args: DoctorArgs) -> DoctorCommandResult {
 
 pub fn execute_top_level_robot_triage() -> DoctorCommandResult {
     let diagnostics = collect_diagnostics();
-    json_result(robot_triage_value(&diagnostics), diagnostics.exit_code())
+    json_result(
+        report_value(Mode::Triage, &diagnostics),
+        diagnostics.exit_code(),
+    )
 }
 
+/// `verify capabilities --json` is the `operator.v1` document, byte-identical to
+/// `verify --describe`; both come from the embedded `operator.json`.
 pub fn execute_top_level_capabilities(args: TopLevelCapabilitiesArgs) -> DoctorCommandResult {
-    let value = top_level_capabilities_value();
     if args.json {
-        json_result(value, 0)
+        text_result(render::operator_contract().to_owned(), 0)
     } else {
         text_result(human_top_level_capabilities(), 0)
     }
@@ -284,214 +332,77 @@ fn required_fields_present(schema: &Result<Value, serde_json::Error>, fields: &[
     })
 }
 
-fn health_value(diagnostics: &Diagnostics) -> Value {
-    json!({
-        "schema": HEALTH_SCHEMA,
-        "tool": TOOL_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "ok": diagnostics.ok(),
-        "status": diagnostics.status(),
-        "contract": DOCTOR_CONTRACT,
-        "schemas": {
-            "report": diagnostics.report_schema_title,
-            "constraint": diagnostics.constraint_schema_title
-        },
-        "witness": {
+/// One `cmdrvl.doctor.v1` report. `findings` holds every check (passing checks
+/// as `info`, failing ones as `error`); `healthy` is exactly "no error finding".
+/// Extra read-only facts (`witness`, `config_footprint`, `side_effects`,
+/// `fixers`) ride alongside the contract fields.
+fn report_value(mode: Mode, diagnostics: &Diagnostics) -> Value {
+    let mut report = Map::new();
+    report.insert("schema_version".to_owned(), json!(DOCTOR_SCHEMA));
+    report.insert("mode".to_owned(), json!(mode.as_str()));
+    report.insert("tool".to_owned(), json!(TOOL_NAME));
+    report.insert("tool_version".to_owned(), json!(env!("CARGO_PKG_VERSION")));
+    report.insert("healthy".to_owned(), json!(diagnostics.ok()));
+    report.insert("findings".to_owned(), findings_value(&diagnostics.checks));
+    match mode {
+        Mode::Health => {}
+        Mode::Capabilities => {
+            // The same document as `verify capabilities --json` / `--describe`.
+            let contract = serde_json::from_str::<Value>(render::operator_contract())
+                .unwrap_or_else(
+                    |error| json!({"error": format!("embedded operator.json: {error}")}),
+                );
+            report.insert("contract".to_owned(), contract);
+        }
+        Mode::Triage => {
+            let next_actions = if diagnostics.ok() {
+                Value::Array(Vec::new())
+            } else {
+                json!(["inspect embedded schema wiring and doctor dispatch checks"])
+            };
+            report.insert("next_actions".to_owned(), next_actions);
+        }
+    }
+    report.insert("doctor_contract".to_owned(), json!(DOCTOR_CONTRACT));
+    report.insert(
+        "witness".to_owned(),
+        json!({
             "ledger_path": diagnostics.witness_ledger_path,
             "opened": false,
             "appended": false,
             "directory_created": false
-        },
-        "config_footprint": paths::config_footprint(),
-        "side_effects": side_effects_value(),
-        "fixers": [],
-        "checks": checks_value(&diagnostics.checks)
-    })
+        }),
+    );
+    report.insert("config_footprint".to_owned(), paths::config_footprint());
+    report.insert("side_effects".to_owned(), side_effects_value());
+    report.insert("fixers".to_owned(), json!([]));
+    Value::Object(report)
 }
 
-fn capabilities_value() -> Value {
-    json!({
-        "schema": CAPABILITIES_SCHEMA,
-        "tool": TOOL_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "contract": DOCTOR_CONTRACT,
-        "commands": [
-            {
-                "name": "doctor health",
-                "json": true,
-                "purpose": "Summarize embedded schema and dispatch health without reading bound inputs."
-            },
-            {
-                "name": "doctor capabilities --json",
-                "json": true,
-                "purpose": "Expose machine-readable doctor capabilities and side-effect guarantees."
-            },
-            {
-                "name": "doctor robot-docs",
-                "json": false,
-                "purpose": "Print compact agent-facing command documentation."
-            },
-            {
-                "name": "doctor --robot-triage",
-                "json": true,
-                "purpose": "Return a machine-readable triage packet for automation."
-            }
-        ],
-        "exit_codes": {
-            "0": "doctor check healthy or documentation rendered",
-            "2": "doctor check unhealthy or command-line refusal"
-        },
-        "schemas": {
-            "health": HEALTH_SCHEMA,
-            "capabilities": CAPABILITIES_SCHEMA,
-            "triage": TRIAGE_SCHEMA
-        },
-        "config_footprint": paths::config_footprint(),
-        "side_effects": side_effects_value(),
-        "fixers": []
-    })
-}
-
-fn top_level_capabilities_value() -> Value {
-    json!({
-        "schema": TOP_LEVEL_CAPABILITIES_SCHEMA,
-        "tool": TOOL_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "purpose": "Deterministic constraint evaluation for declared relation constraints.",
-        "protocols": {
-            "operator": "operator.v0",
-            "constraint": CONSTRAINT_VERSION,
-            "report": REPORT_VERSION,
-            "doctor_health": HEALTH_SCHEMA,
-            "doctor_capabilities": CAPABILITIES_SCHEMA,
-            "doctor_triage": TRIAGE_SCHEMA
-        },
-        "standard_agent_surfaces": {
-            "robot_triage": "verify --robot-triage",
-            "capabilities_json": "verify capabilities --json",
-            "robot_docs": "verify robot-docs guide",
-            "operator_contract": "verify --describe"
-        },
-        "commands": [
-            {
-                "command": "verify --robot-triage",
-                "read_only": true,
-                "writes_witness": false,
-                "stdout": "verify.doctor.triage.v1 JSON",
-                "exit_codes": {"0": "healthy", "2": "unhealthy diagnostics"}
-            },
-            {
-                "command": "verify capabilities --json",
-                "read_only": true,
-                "writes_witness": false,
-                "stdout": TOP_LEVEL_CAPABILITIES_SCHEMA
-            },
-            {
-                "command": "verify robot-docs guide",
-                "read_only": true,
-                "writes_witness": false,
-                "stdout": "plain text agent guide"
-            },
-            {
-                "command": "verify --describe",
-                "read_only": true,
-                "writes_witness": false,
-                "stdout": "operator.v0 JSON"
-            },
-            {
-                "command": "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--json] [--no-witness]",
-                "read_only": false,
-                "writes_witness": "unless --no-witness is set",
-                "domain_outcomes": {"0": "PASS", "1": "FAIL", "2": "REFUSAL"},
-                "stdout": "human report or verify.report.v1 JSON"
-            },
-            {
-                "command": "verify <DATASET> --rules <AUTHORING> [--json] [--no-witness]",
-                "read_only": false,
-                "writes_witness": "unless --no-witness is set",
-                "domain_outcomes": {"0": "PASS", "1": "FAIL", "2": "REFUSAL"},
-                "stdout": "human report or verify.report.v1 JSON"
-            },
-            {
-                "command": "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
-                "read_only": "only with --check or --json and without --out",
-                "writes_outputs": "when --out is set"
-            },
-            {
-                "command": "verify validate <COMPILED_CONSTRAINTS> [--json]",
-                "read_only": true,
-                "stdout": "validation result"
-            },
-            {
-                "command": "verify witness <query|last|count> [--json]",
-                "read_only": true,
-                "opens_witness_ledger": true
-            },
-            {
-                "command": "verify --schema",
-                "read_only": true,
-                "stdout": REPORT_VERSION
-            },
-            {
-                "command": "verify compile --schema",
-                "read_only": true,
-                "stdout": CONSTRAINT_VERSION
-            }
-        ],
-        "config_footprint": paths::config_footprint(),
-        "doctor": capabilities_value(),
-        "composition": {
-            "upstream": ["normalize", "materialize"],
-            "factory_upstream": ["twinning", "decoding"],
-            "downstream": ["assess", "pack"],
-            "input_boundary": {
-                "relation_state": "already_canonical",
-                "produced_by": "profile's bounded materialization",
-                "verify_never": ["loads profiles", "resolves --profile-id", "rewrites headers"],
-                "constraint_fields": "canonical relation fields"
-            },
-            "provenance_boundary": {
-                "canonical_input_profile_provenance": "lock.v0 profiles[] and pack membership",
-                "not_in": REPORT_VERSION
-            },
-            "boundaries": [
-                "verify evaluates already-canonical named relations produced upstream by profile's bounded materialization",
-                "verify never loads profiles, resolves --profile-id, or rewrites headers",
-                "canonical input/profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1",
-                "verify enforces declared constraints",
-                "benchmark scores gold-set correctness",
-                "assess decides proceed, escalate, or block"
-            ]
-        }
-    })
-}
-
-fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
-    json!({
-        "schema": TRIAGE_SCHEMA,
-        "tool": TOOL_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "ok": diagnostics.ok(),
-        "status": diagnostics.status(),
-        "contract": DOCTOR_CONTRACT,
-        "summary": {
-            "message": if diagnostics.ok() {
-                "verify doctor checks passed"
-            } else {
-                "verify doctor checks found unhealthy diagnostics"
-            },
-            "failed_checks": diagnostics.checks.iter().filter(|check| !check.ok).count()
-        },
-        "findings": failed_checks_value(&diagnostics.checks),
-        "next_actions": if diagnostics.ok() {
-            Value::Array(Vec::new())
-        } else {
-            json!(["inspect embedded schema wiring and doctor dispatch checks"])
-        },
-        "config_footprint": paths::config_footprint(),
-        "side_effects": side_effects_value(),
-        "fixers": []
-    })
+fn findings_value(checks: &[Check]) -> Value {
+    Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let mut finding = Map::new();
+                finding.insert("id".to_owned(), json!(check.name));
+                finding.insert(
+                    "severity".to_owned(),
+                    json!(if check.ok { "info" } else { "error" }),
+                );
+                finding.insert("message".to_owned(), json!(check.detail));
+                if !check.ok {
+                    finding.insert(
+                        "fix".to_owned(),
+                        json!(
+                            "reinstall verify or report a bug: the embedded schema wiring is broken"
+                        ),
+                    );
+                }
+                Value::Object(finding)
+            })
+            .collect(),
+    )
 }
 
 fn side_effects_value() -> Value {
@@ -500,37 +411,6 @@ fn side_effects_value() -> Value {
         effects.insert((*name).to_owned(), Value::Bool(false));
     }
     Value::Object(effects)
-}
-
-fn checks_value(checks: &[Check]) -> Value {
-    Value::Array(
-        checks
-            .iter()
-            .map(|check| {
-                json!({
-                    "name": check.name,
-                    "ok": check.ok,
-                    "detail": check.detail
-                })
-            })
-            .collect(),
-    )
-}
-
-fn failed_checks_value(checks: &[Check]) -> Value {
-    Value::Array(
-        checks
-            .iter()
-            .filter(|check| !check.ok)
-            .map(|check| {
-                json!({
-                    "severity": "error",
-                    "check": check.name,
-                    "detail": check.detail
-                })
-            })
-            .collect(),
-    )
 }
 
 fn human_health(diagnostics: &Diagnostics) -> String {
@@ -559,8 +439,9 @@ fn human_capabilities() -> String {
         "commands:",
         "- doctor health [--json]",
         "- doctor capabilities --json",
+        "- doctor triage --json",
         "- doctor robot-docs",
-        "- doctor --robot-triage",
+        "- doctor --robot-triage (alias of doctor triage --json)",
         "read_only: true",
         "side_effects: none",
         "fixers: none",
@@ -571,16 +452,16 @@ fn human_capabilities() -> String {
 fn human_top_level_capabilities() -> String {
     [
         "verify capabilities",
-        "schema: verify.capabilities.v1",
+        "schema: operator.v1 (`verify capabilities --json` is identical to `verify --describe`)",
         "standard agent surfaces:",
-        "- verify --robot-triage",
+        "- verify doctor triage --json (alias: verify --robot-triage)",
         "- verify capabilities --json",
         "- verify robot-docs guide",
         "- verify --describe",
-        "domain outcomes:",
-        "- 0: PASS",
-        "- 1: FAIL",
-        "- 2: REFUSAL",
+        "exit codes:",
+        "- 0: PASS, or a successful read (an empty witness query prints [] and exits 0)",
+        "- 1: FAIL (doctor: unhealthy)",
+        "- 2: REFUSAL / CLI error",
     ]
     .join("\n")
 }
@@ -590,17 +471,22 @@ fn top_level_robot_docs() -> String {
         "verify robot-docs guide",
         "",
         "Quick start:",
-        "- `verify --robot-triage` returns one read-only JSON health packet.",
-        "- `verify capabilities --json` returns the full machine-readable command contract.",
+        "- `verify doctor triage --json` (alias `verify --robot-triage`) returns one read-only `cmdrvl.doctor.v1` packet.",
+        "- `verify capabilities --json` returns the `operator.v1` command contract (same document as `verify --describe`).",
         "- `verify run COMPILED.verify.json --bind input=data.csv --json --no-witness` evaluates a compiled constraint set without appending a witness record.",
         "- `verify DATASET.csv --rules rules.yaml --json --no-witness` compiles and runs the arity-1 shortcut.",
         "- `verify compile AUTHORING.yaml --check --json` validates authoring without writing an output file.",
         "",
         "Outcome contract:",
-        "- `0` means PASS.",
-        "- `1` means FAIL.",
-        "- `2` means REFUSAL.",
+        "- `0` means PASS, or a successful read command.",
+        "- `1` means FAIL (a constraint failed), or `doctor` found the install unhealthy.",
+        "- `2` means REFUSAL or a CLI error. It is never a verdict and never doctor-unhealthy.",
         "- JSON report output is `verify.report.v1`.",
+        "",
+        "Scripting (`set -e`):",
+        "- `verify run ... ` exits `1` on FAIL by design; guard it: `verify run c.json --bind input=d.csv || [ $? -eq 1 ]`.",
+        "- `verify witness query|count|last` never exits `1` for an empty result: `query` prints `[]`, `count` prints `{\"count\":0}`, `last` prints `null`, all with exit `0`.",
+        "- Narrow a query with `--outcome PASS|FAIL|REFUSAL`, `--command run|compile|...` and `--limit N`.",
         "",
         "Witness boundary:",
         "- Run/evaluate commands append local witness records by default.",
@@ -624,9 +510,9 @@ fn robot_docs() -> String {
         "",
         "Read-only commands:",
         "- `verify doctor health [--json]` reports embedded schema and dispatch health.",
-        "- `verify doctor capabilities --json` reports command capabilities, side effects, and fixers.",
+        "- `verify doctor capabilities --json` reports the `operator.v1` contract (same document as `verify capabilities --json`) inside a `cmdrvl.doctor.v1` report.",
+        "- `verify doctor triage --json` emits the `cmdrvl.doctor.v1` triage report; `verify doctor --robot-triage` and `verify --robot-triage` are aliases.",
         "- `verify doctor robot-docs` prints this compact agent-facing reference.",
-        "- `verify doctor --robot-triage` emits `verify.doctor.triage.v1` JSON.",
         "",
         "Safety contract:",
         "- The doctor surface does not read datasets, authoring files, compiled constraints, or stdin.",
@@ -636,8 +522,121 @@ fn robot_docs() -> String {
         "- No `doctor --fix` mode exists in this slice.",
         "",
         "Exit codes:",
-        "- `0`: doctor checks or documentation completed.",
-        "- `2`: command-line refusal or unhealthy doctor diagnostics.",
+        "- `0`: doctor checks healthy, or documentation completed.",
+        "- `1`: doctor found an unhealthy diagnostic (an `error` finding). Changed from `2` in the family contract.",
+        "- `2`: command-line refusal or usage error only.",
     ]
     .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use spine_rules::doctor::{DoctorMode, DoctorReport, check_doctor_run};
+
+    use super::*;
+
+    fn diagnostics(failing: bool) -> Diagnostics {
+        Diagnostics {
+            report_schema_title: "verify.report.v1".to_owned(),
+            constraint_schema_title: "verify.constraint.v1".to_owned(),
+            witness_ledger_path: "/nonexistent/witness.jsonl".to_owned(),
+            checks: vec![
+                Check {
+                    name: "report_schema_embedded_json",
+                    ok: !failing,
+                    detail: "planted".to_owned(),
+                },
+                Check {
+                    name: "doctor_dispatch_read_only",
+                    ok: true,
+                    detail: "ok".to_owned(),
+                },
+            ],
+        }
+    }
+
+    fn args(json: bool, robot_triage: bool, action: Option<DoctorAction>) -> DoctorArgs {
+        DoctorArgs {
+            robot_triage,
+            json,
+            action,
+        }
+    }
+
+    fn json_flag() -> DoctorJsonArgs {
+        DoctorJsonArgs { json: true }
+    }
+
+    /// Planted negative: an unhealthy doctor exits 1 in every JSON spelling,
+    /// and the exit code agrees with the report under the family checker.
+    #[test]
+    fn unhealthy_doctor_exits_one_never_two() {
+        let spellings: [(DoctorMode, DoctorArgs); 5] = [
+            (DoctorMode::Health, args(true, false, None)),
+            (
+                DoctorMode::Health,
+                args(false, false, Some(DoctorAction::Health(json_flag()))),
+            ),
+            (
+                DoctorMode::Capabilities,
+                args(false, false, Some(DoctorAction::Capabilities(json_flag()))),
+            ),
+            (
+                DoctorMode::Triage,
+                args(false, false, Some(DoctorAction::Triage(json_flag()))),
+            ),
+            // Deprecated alias still works and still exits 1.
+            (DoctorMode::Triage, args(false, true, None)),
+        ];
+        for (mode, spelling) in spellings {
+            let result = render(spelling.clone(), &diagnostics(true));
+            assert_eq!(
+                result.exit_code, 1,
+                "{mode:?}: unhealthy must exit 1, not 2"
+            );
+            let stdout = result.stdout.expect("json report");
+            let violations = check_doctor_run(mode, stdout.as_bytes(), Some(1));
+            assert!(violations.is_empty(), "{mode:?}: {violations:?}");
+            let report = DoctorReport::parse(&stdout).expect("report parses");
+            assert!(!report.healthy);
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.id == "report_schema_embedded_json" && f.fix.is_some())
+            );
+            // The checker really does reject the old behavior.
+            assert!(
+                !check_doctor_run(mode, stdout.as_bytes(), Some(2)).is_empty(),
+                "{mode:?}: exit 2 for an unhealthy report must be a contract violation"
+            );
+        }
+    }
+
+    #[test]
+    fn healthy_doctor_exits_zero_and_human_mode_follows_health() {
+        let healthy = diagnostics(false);
+        assert_eq!(render(args(true, false, None), &healthy).exit_code, 0);
+        let unhealthy = diagnostics(true);
+        let human = render(args(false, false, None), &unhealthy);
+        assert_eq!(human.exit_code, 1);
+        assert!(human.stdout.is_some_and(|text| text.contains("unhealthy")));
+        // robot-docs is documentation, never a health verdict.
+        let docs = render(
+            args(false, false, Some(DoctorAction::RobotDocs)),
+            &unhealthy,
+        );
+        assert_eq!(docs.exit_code, 0);
+    }
+
+    #[test]
+    fn capabilities_report_embeds_the_operator_contract_verbatim() {
+        let result = render(
+            args(false, false, Some(DoctorAction::Capabilities(json_flag()))),
+            &diagnostics(false),
+        );
+        let report: Value = serde_json::from_str(&result.stdout.expect("json")).expect("parses");
+        let operator: Value = serde_json::from_str(render::operator_contract()).expect("parses");
+        assert_eq!(report["contract"], operator);
+    }
 }

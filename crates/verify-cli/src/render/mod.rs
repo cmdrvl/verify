@@ -53,9 +53,9 @@ mod tests {
     fn operator_contract_is_embedded() {
         let value: serde_json::Value =
             serde_json::from_str(operator_contract()).expect("operator contract must parse");
-        assert_eq!(value["schema_version"], "operator.v0");
+        assert_eq!(value["schema_version"], "operator.v1");
         assert_eq!(value["name"], "verify");
-        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["tool_version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

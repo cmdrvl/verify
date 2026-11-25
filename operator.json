@@ -1,7 +1,8 @@
 {
-  "schema_version": "operator.v0",
+  "schema_version": "operator.v1",
   "name": "verify",
-  "version": "0.5.1",
+  "tool_version": "0.5.2",
+  "contract_version": "1.0.0",
   "description": "Deterministic constraint evaluation over already-canonical named relations",
   "repository": "https://github.com/cmdrvl/verify",
   "license": "MIT",
@@ -12,14 +13,13 @@
     "usage": [
       "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--no-witness]",
       "verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--no-witness]",
-      "verify --robot-triage",
+      "verify doctor triage --json",
       "verify capabilities --json",
       "verify robot-docs guide",
       "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
       "verify validate <COMPILED_CONSTRAINTS> [--json]",
-      "verify witness <query|last|count> [--json]",
-      "verify doctor <health|capabilities|robot-docs> [OPTIONS]",
-      "verify doctor --robot-triage"
+      "verify witness <query|last|count> [--outcome <OUTCOME>] [--command <COMMAND>] [--limit <N>] [--json]",
+      "verify doctor [health|capabilities|triage|robot-docs] [--json]"
     ],
     "output_mode": "report",
     "output_schema": "verify.report.v1",
@@ -69,7 +69,20 @@
       "name": "json",
       "flag": "--json",
       "type": "flag",
-      "description": "Emit verify.report.v1 JSON for run outcomes"
+      "description": "Emit verify.report.v1 JSON for run outcomes, and JSON for doctor, compile, validate and witness"
+    },
+    {
+      "name": "out",
+      "flag": "--out",
+      "aliases": ["--output"],
+      "type": "file_path",
+      "description": "compile: write the compiled artifact here (`--output` is a deprecated alias)"
+    },
+    {
+      "name": "check",
+      "flag": "--check",
+      "type": "flag",
+      "description": "compile: validate authoring without writing an output file"
     },
     {
       "name": "sample_affected",
@@ -84,10 +97,28 @@
       "description": "Suppress local witness ledger recording for this run"
     },
     {
+      "name": "outcome",
+      "flag": "--outcome",
+      "type": "string",
+      "description": "witness query/count: keep only records with this outcome (PASS, FAIL or REFUSAL)"
+    },
+    {
+      "name": "command",
+      "flag": "--command",
+      "type": "string",
+      "description": "witness query/count: keep only records written by this verify command (run, compile, ...)"
+    },
+    {
+      "name": "limit",
+      "flag": "--limit",
+      "type": "integer",
+      "description": "witness query: return at most the N most recent matching records"
+    },
+    {
       "name": "describe",
       "flag": "--describe",
       "type": "flag",
-      "description": "Print compiled operator.json and exit 0"
+      "description": "Print this operator.json (the operator.v1 contract) and exit 0"
     },
     {
       "name": "schema",
@@ -99,7 +130,7 @@
       "name": "robot_triage",
       "flag": "--robot-triage",
       "type": "flag",
-      "description": "Emit one-call read-only machine triage JSON for agents"
+      "description": "Deprecated alias of `verify doctor triage --json`"
     },
     {
       "name": "version",
@@ -109,10 +140,10 @@
     }
   ],
 
-  "subcommands": [
+  "commands": [
     {
       "name": "capabilities",
-      "description": "Print the machine-readable verify capability contract",
+      "description": "Print the operator.v1 contract; `verify capabilities --json` is byte-identical in content to `verify --describe`",
       "status": "available",
       "usage": "verify capabilities --json",
       "read_only": true,
@@ -125,7 +156,7 @@
         }
       ],
       "current_runtime_behavior": {
-        "schema_version": "verify.capabilities.v1",
+        "schema_version": "operator.v1",
         "writes_witness": false,
         "writes_files": false,
         "uses_network": false
@@ -188,12 +219,12 @@
     },
     {
       "name": "witness",
-      "description": "Witness ledger query commands",
+      "description": "Witness ledger read commands. An empty result is success: exit 0 with `[]` (query), `{\"count\":0}` (count) or `null` (last)",
       "status": "available",
       "actions": [
         {
           "name": "query",
-          "usage": "verify witness query [--tool <name>] [--since <iso8601>] [--until <iso8601>] [--outcome <PASS|FAIL|REFUSAL>] [--input-hash <substring>] [--limit <n>] [--json]"
+          "usage": "verify witness query [--outcome <PASS|FAIL|REFUSAL>] [--command <COMMAND>] [--limit <N>] [--json]"
         },
         {
           "name": "last",
@@ -201,12 +232,13 @@
         },
         {
           "name": "count",
-          "usage": "verify witness count [--tool <name>] [--since <iso8601>] [--until <iso8601>] [--outcome <PASS|FAIL|REFUSAL>] [--input-hash <substring>] [--json]"
+          "usage": "verify witness count [--outcome <PASS|FAIL|REFUSAL>] [--command <COMMAND>] [--json]"
         }
       ],
       "current_runtime_behavior": {
         "success_exit_code": 0,
-        "no_match_exit_code": 1,
+        "empty_result_exit_code": 0,
+        "empty_query_stdout": "[]",
         "error_exit_code": 2,
         "ledger_path_resolution": [
           "EPISTEMIC_WITNESS",
@@ -216,9 +248,9 @@
     },
     {
       "name": "doctor",
-      "description": "Read-only diagnostics for agents and operators",
+      "description": "Read-only diagnostics (cmdrvl.doctor.v1). Exit 0 healthy, 1 unhealthy, 2 usage error only. `doctor --robot-triage` and `--robot-triage` are deprecated aliases of `doctor triage --json`",
       "status": "available",
-      "usage": "verify doctor <health|capabilities|robot-docs> [OPTIONS] | verify doctor --robot-triage",
+      "usage": "verify doctor [health|capabilities|triage|robot-docs] [--json]",
       "read_only": true,
       "fix_mode": "not_available",
       "current_runtime_behavior": {
@@ -238,12 +270,16 @@
           "usage": "verify doctor capabilities --json"
         },
         {
+          "name": "triage",
+          "usage": "verify doctor triage --json"
+        },
+        {
           "name": "robot-docs",
           "usage": "verify doctor robot-docs"
         },
         {
           "name": "robot-triage",
-          "usage": "verify doctor --robot-triage"
+          "usage": "verify doctor --robot-triage (deprecated alias of triage)"
         }
       ]
     }
@@ -251,11 +287,11 @@
 
   "exit_codes": {
     "0": {
-      "meaning": "PASS / successful read-only command",
+      "meaning": "PASS / successful read command (an empty witness query prints [] and exits 0)",
       "domain": "positive"
     },
     "1": {
-      "meaning": "FAIL / witness query with no matches",
+      "meaning": "FAIL (a constraint failed) | (doctor: unhealthy)",
       "domain": "negative"
     },
     "2": {
@@ -281,14 +317,64 @@
       "action": "fix_authoring"
     },
     {
+      "code": "E_DUPLICATE_BINDING",
+      "message": "The same relation name was bound more than once",
+      "action": "remove_duplicate_bind"
+    },
+    {
+      "code": "E_MISSING_BINDING",
+      "message": "A relation the constraints declare was not bound",
+      "action": "add_missing_bind"
+    },
+    {
+      "code": "E_UNDECLARED_BINDING",
+      "message": "A --bind names a relation the constraints do not declare",
+      "action": "remove_or_rename_bind"
+    },
+    {
+      "code": "E_FORMAT_DETECT",
+      "message": "Bound input is not CSV, JSON, JSONL or Parquet",
+      "action": "use_supported_format"
+    },
+    {
       "code": "E_FIELD_NOT_FOUND",
       "message": "Rule references a field missing from a bound canonical relation",
       "action": "fix_constraints_or_upstream_materialization"
     },
     {
+      "code": "E_BAD_EXPR",
+      "message": "A rule expression does not parse",
+      "action": "fix_rule_expression"
+    },
+    {
+      "code": "E_KEY_INVALID",
+      "message": "Key data or a binding's key_fields are invalid",
+      "action": "fix_key_data_or_key_fields"
+    },
+    {
+      "code": "E_KEY_AMBIGUOUS",
+      "message": "A keyed relation has duplicate keys",
+      "action": "deduplicate_or_correct_key_fields"
+    },
+    {
+      "code": "E_KEY_UNMATCHED",
+      "message": "A keyed row has no counterpart in the other relation",
+      "action": "supply_counterpart_or_align_keys"
+    },
+    {
+      "code": "E_SQL_ERROR",
+      "message": "A query-backed rule failed to execute",
+      "action": "fix_query_rule"
+    },
+    {
       "code": "E_BATCH_ONLY_RULE",
       "message": "Embedded execution received a batch-only rule",
       "action": "run_in_batch_or_lower_rule"
+    },
+    {
+      "code": "E_KEY_CONFLICT",
+      "message": "A CLI --key conflicts with the authored binding key",
+      "action": "remove_cli_override_or_fix_authoring"
     },
     {
       "code": "E_INPUT_NOT_LOCKED",
@@ -299,16 +385,49 @@
       "code": "E_INPUT_DRIFT",
       "message": "Bound input hash differs from the lock member",
       "action": "use_locked_artifact_or_regenerate_lock"
+    },
+    {
+      "code": "E_TOO_LARGE",
+      "message": "Input exceeds --max-rows or --max-bytes",
+      "action": "raise_limit_or_split_input"
     }
   ],
 
+  "env_vars": [
+    {
+      "name": "EPISTEMIC_WITNESS",
+      "description": "Explicit witness ledger path; overrides the implicit ledger and disables legacy migration",
+      "default": "~/.cmdrvl/state/witness/witness.jsonl"
+    },
+    {
+      "name": "HOME",
+      "description": "Root of the implicit witness ledger and legacy-path migration"
+    },
+    {
+      "name": "NO_COLOR",
+      "description": "Accepted for family parity; verify never emits ANSI escape sequences, with or without it"
+    }
+  ],
+
+  "formats": ["csv", "json", "jsonl", "parquet"],
+
+  "side_effects": {
+    "reads_files": true,
+    "writes_files": true,
+    "network": false,
+    "writes_witness": true,
+    "notes": "run and the arity-1 shortcut append a witness record unless --no-witness; compile writes only with --out; doctor, capabilities, robot-docs, validate and witness read commands never write"
+  },
+
+  "pipeline": {
+    "upstream": ["profile", "normalize", "materialize", "shape", "rvl"],
+    "downstream": ["assess", "pack"],
+    "mode": "canonical_relations",
+    "input": "already-canonical named relations",
+    "example_pipeline": "profile materialize <raw> > canonical.csv; lock ...; verify run constraints.verify.json --bind input=canonical.csv --lock canonical.lock.json --json"
+  },
+
   "capabilities": {
-    "formats": [
-      "csv",
-      "json",
-      "jsonl",
-      "parquet"
-    ],
     "profile_aware": false,
     "header_rewriting": false,
     "streaming": false,
@@ -338,11 +457,12 @@
       "provenance": "canonical input and profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1"
     },
     "agent_surfaces": {
+      "doctor_triage": "verify doctor triage --json",
       "robot_triage": "verify --robot-triage",
       "capabilities": "verify capabilities --json",
       "robot_docs": "verify robot-docs guide",
       "operator_contract": "verify --describe",
-      "doctor": "verify doctor <health|capabilities|robot-docs> [OPTIONS]"
+      "doctor": "verify doctor [health|capabilities|triage|robot-docs] [--json]"
     },
     "witness": {
       "ambient_recording": "enabled_by_default_for_run",
@@ -351,20 +471,27 @@
     }
   },
 
-  "pipeline": {
-    "mode": "canonical_relations",
-    "input": "already-canonical named relations",
-    "example_pipeline": "profile materialize <raw> > canonical.csv; lock ...; verify run constraints.verify.json --bind input=canonical.csv --lock canonical.lock.json --json",
-    "upstream": [
-      "profile",
-      "normalize",
-      "materialize",
-      "shape",
-      "rvl"
-    ],
-    "downstream": [
-      "assess",
-      "pack"
+  "composition": {
+    "upstream": ["normalize", "materialize"],
+    "factory_upstream": ["twinning", "decoding"],
+    "downstream": ["assess", "pack"],
+    "input_boundary": {
+      "relation_state": "already_canonical",
+      "produced_by": "profile's bounded materialization",
+      "verify_never": ["loads profiles", "resolves --profile-id", "rewrites headers"],
+      "constraint_fields": "canonical relation fields"
+    },
+    "provenance_boundary": {
+      "canonical_input_profile_provenance": "lock.v0 profiles[] and pack membership",
+      "not_in": "verify.report.v1"
+    },
+    "boundaries": [
+      "verify evaluates already-canonical named relations produced upstream by profile's bounded materialization",
+      "verify never loads profiles, resolves --profile-id, or rewrites headers",
+      "canonical input/profile provenance rides in lock.v0 profiles[] and pack membership, not verify.report.v1",
+      "verify enforces declared constraints",
+      "benchmark scores gold-set correctness",
+      "assess decides proceed, escalate, or block"
     ]
   }
 }

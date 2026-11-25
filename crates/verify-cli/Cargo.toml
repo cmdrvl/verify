@@ -1,6 +1,9 @@
 [package]
 name = "verify-cli"
-version.workspace = true
+# Explicit, not `version.workspace = true`: spine-rules' r006_operator_version_matches_cargo_toml
+# reads this file and rejects workspace-inherited versions. `tests/family_contract.rs`
+# fails if it drifts from `[workspace.package] version` in the root Cargo.toml.
+version = "0.5.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -19,6 +22,14 @@ path = "../../tests/cli.rs"
 [[test]]
 name = "doctor"
 path = "../../tests/doctor.rs"
+
+[[test]]
+name = "golden_rules"
+path = "../../tests/golden_rules.rs"
+
+[[test]]
+name = "family_contract"
+path = "../../tests/family_contract.rs"
 
 [[test]]
 name = "perf_smoke"
@@ -58,3 +69,7 @@ sha2 = "0.10"
 verify-core = { path = "../verify-core" }
 verify-duckdb = { path = "../verify-duckdb" }
 verify-engine = { path = "../verify-engine" }
+
+[dev-dependencies]
+spine-rules = { git = "https://github.com/cmdrvl/spine-rules" }
+tempfile = "3"

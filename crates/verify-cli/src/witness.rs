@@ -17,6 +17,15 @@ pub struct WitnessArgs {
     pub action: Option<String>,
     #[arg(long)]
     pub json: bool,
+    /// Keep only records whose outcome matches (`PASS`, `FAIL`, `REFUSAL`).
+    #[arg(long, value_name = "OUTCOME")]
+    pub outcome: Option<String>,
+    /// Keep only records written by this verify command (`run`, `compile`, ...).
+    #[arg(long, value_name = "COMMAND")]
+    pub command: Option<String>,
+    /// `query` only: return at most the N most recent matching records.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +63,11 @@ impl WitnessCommandResult {
         }
     }
 
-    fn no_match(stdout: Option<String>, message: &str) -> Self {
+    /// A valid read that found nothing. Exit 0 per the family ADR: an empty
+    /// result is success, never a domain FAIL. `message` is advisory (stderr).
+    fn empty(stdout: Option<String>, message: &str) -> Self {
         Self {
-            exit_code: 1,
+            exit_code: 0,
             stdout,
             stderr: Some(message.to_owned()),
         }
@@ -73,9 +84,9 @@ impl WitnessCommandResult {
 
 pub fn execute(args: WitnessArgs) -> WitnessCommandResult {
     match args.action.as_deref() {
-        Some("query") => execute_query(args.json),
+        Some("query") => execute_query(&args),
         Some("last") => execute_last(args.json),
-        Some("count") => execute_count(args.json),
+        Some("count") => execute_count(&args),
         Some(action) => WitnessCommandResult::error(format!(
             "verify: witness action must be one of query, last, or count; got `{action}`"
         )),
@@ -119,20 +130,38 @@ pub(crate) fn witness_ledger_path() -> PathBuf {
     paths::default_witness_path()
 }
 
-fn execute_query(json_output: bool) -> WitnessCommandResult {
+/// Apply `--outcome` / `--command` (case-sensitive exact match on the record fields).
+fn filter_records(records: Vec<Value>, args: &WitnessArgs) -> Vec<Value> {
+    records
+        .into_iter()
+        .filter(|record| {
+            args.outcome
+                .as_deref()
+                .is_none_or(|want| record.get("outcome").and_then(Value::as_str) == Some(want))
+                && args
+                    .command
+                    .as_deref()
+                    .is_none_or(|want| record.get("command").and_then(Value::as_str) == Some(want))
+        })
+        .collect()
+}
+
+fn execute_query(args: &WitnessArgs) -> WitnessCommandResult {
+    let json_output = args.json;
     let records = match load_verify_records() {
-        Ok(records) => records,
+        Ok(records) => filter_records(records, args),
         Err(error) => return WitnessCommandResult::error(error),
+    };
+    let records = match args.limit {
+        Some(limit) if records.len() > limit => records[records.len() - limit..].to_vec(),
+        _ => records,
     };
 
     if records.is_empty() {
         return if json_output {
-            WitnessCommandResult::no_match(
-                Some("[]".to_owned()),
-                "verify: no witness records found",
-            )
+            WitnessCommandResult::empty(Some("[]".to_owned()), "verify: no witness records matched")
         } else {
-            WitnessCommandResult::no_match(None, "verify: no witness records found")
+            WitnessCommandResult::empty(None, "verify: no witness records matched")
         };
     }
 
@@ -159,12 +188,9 @@ fn execute_last(json_output: bool) -> WitnessCommandResult {
 
     let Some(record) = records.last() else {
         return if json_output {
-            WitnessCommandResult::no_match(
-                Some("null".to_owned()),
-                "verify: witness ledger is empty",
-            )
+            WitnessCommandResult::empty(Some("null".to_owned()), "verify: witness ledger is empty")
         } else {
-            WitnessCommandResult::no_match(None, "verify: witness ledger is empty")
+            WitnessCommandResult::empty(None, "verify: witness ledger is empty")
         };
     };
 
@@ -177,20 +203,21 @@ fn execute_last(json_output: bool) -> WitnessCommandResult {
     }
 }
 
-fn execute_count(json_output: bool) -> WitnessCommandResult {
+fn execute_count(args: &WitnessArgs) -> WitnessCommandResult {
+    let json_output = args.json;
     let records = match load_verify_records() {
-        Ok(records) => records,
+        Ok(records) => filter_records(records, args),
         Err(error) => return WitnessCommandResult::error(error),
     };
 
     if records.is_empty() {
         return if json_output {
-            WitnessCommandResult::no_match(
+            WitnessCommandResult::empty(
                 Some(json!({ "count": 0 }).to_string()),
-                "verify: no witness records found",
+                "verify: no witness records matched",
             )
         } else {
-            WitnessCommandResult::no_match(None, "verify: no witness records found")
+            WitnessCommandResult::empty(Some("0".to_owned()), "verify: no witness records matched")
         };
     }
 

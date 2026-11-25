@@ -54,9 +54,74 @@ struct DispatchOutcome {
 }
 
 fn main() -> ExitCode {
-    emit(dispatch(Cli::parse_from(normalize_shortcut_args(
-        std::env::args_os(),
-    ))))
+    let args: Vec<OsString> = std::env::args_os().collect();
+    if let Some(message) = typo_hint(&args) {
+        return emit(refusal_outcome(message));
+    }
+    emit(dispatch(Cli::parse_from(normalize_shortcut_args(args))))
+}
+
+/// Subcommands a first positional argument can be a typo of.
+const KNOWN_COMMANDS: &[&str] = &[
+    "run",
+    "compile",
+    "validate",
+    "witness",
+    "doctor",
+    "capabilities",
+    "robot-docs",
+];
+
+/// `true` when `a` and `b` differ by exactly one insertion, deletion,
+/// substitution or adjacent transposition.
+fn one_typo_apart(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a == b {
+        return false;
+    }
+    match a.len().abs_diff(b.len()) {
+        0 => {
+            let diffs: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+            diffs.len() == 1
+                || (diffs.len() == 2
+                    && diffs[1] == diffs[0] + 1
+                    && a[diffs[0]] == b[diffs[1]]
+                    && a[diffs[1]] == b[diffs[0]])
+        }
+        1 => {
+            let (long, short) = if a.len() > b.len() {
+                (&a, &b)
+            } else {
+                (&b, &a)
+            };
+            let skip = (0..short.len())
+                .find(|&i| long[i] != short[i])
+                .unwrap_or(short.len());
+            long[skip + 1..] == short[skip..]
+        }
+        _ => false,
+    }
+}
+
+/// The root shortcut (`verify <DATASET> --rules ...`) treats any unknown first
+/// word as a dataset path, so a mistyped subcommand such as `verify docter`
+/// would otherwise fail with an unrelated missing-argument error. If the word
+/// is one typo away from a subcommand and is not an existing path, refuse with
+/// a hint instead.
+fn typo_hint(args: &[OsString]) -> Option<String> {
+    let first = args.get(1)?.to_str()?;
+    if first.starts_with('-')
+        || KNOWN_COMMANDS.contains(&first)
+        || std::path::Path::new(first).exists()
+    {
+        return None;
+    }
+    let suggestion = KNOWN_COMMANDS
+        .iter()
+        .find(|command| one_typo_apart(first, command))?;
+    Some(format!(
+        "verify: unknown command `{first}`; did you mean `{suggestion}`? (`{first}` is not an existing dataset path either; see `verify --help`)"
+    ))
 }
 
 fn emit(outcome: DispatchOutcome) -> ExitCode {
@@ -217,6 +282,33 @@ mod tests {
                 OsString::from("authoring.yaml"),
             ]
         );
+    }
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn one_typo_covers_substitution_insertion_deletion_transposition() {
+        assert!(one_typo_apart("docter", "doctor"));
+        assert!(one_typo_apart("runn", "run"));
+        assert!(one_typo_apart("rn", "run"));
+        assert!(one_typo_apart("wtiness", "witness"));
+        assert!(!one_typo_apart("doctor", "doctor"));
+        assert!(!one_typo_apart("dctr", "doctor"));
+        assert!(!one_typo_apart("dataset", "doctor"));
+    }
+
+    #[test]
+    fn typo_hint_names_the_subcommand_but_never_hijacks_real_paths() {
+        let hint = typo_hint(&args(&["verify", "docter"])).expect("typo should be hinted");
+        assert!(hint.contains("did you mean `doctor`"), "{hint}");
+        // A real subcommand, a flag, an existing path and a far-off word are all left alone.
+        assert_eq!(typo_hint(&args(&["verify", "doctor"])), None);
+        assert_eq!(typo_hint(&args(&["verify", "--json"])), None);
+        assert_eq!(typo_hint(&args(&["verify", "Cargo.toml"])), None);
+        assert_eq!(typo_hint(&args(&["verify", "input.csv"])), None);
+        assert_eq!(typo_hint(&args(&["verify"])), None);
     }
 
     #[test]

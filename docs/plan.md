@@ -1181,8 +1181,9 @@ verify --describe
 verify witness <query|last|count>
 verify doctor health [--json]
 verify doctor capabilities --json
+verify doctor triage --json
 verify doctor robot-docs
-verify doctor --robot-triage
+verify doctor --robot-triage   # deprecated alias of `doctor triage --json`
 ```
 
 `verify validate` validates compiled `verify.constraint.v1` artifacts only.
@@ -1195,6 +1196,14 @@ compile surface because it is the output contract of `verify compile`.
 `verify witness` is read/query-only. It participates in the same local receipt
 log pattern as the other spine tools, but witness remains supplemental local
 context rather than portable evidence.
+
+Family exit-code contract for these read commands (`spine-rules/docs/exit-codes.md`):
+an empty result is success. `witness query` prints `[]`, `witness count` prints
+`{"count":0}` and `witness last` prints `null`, each with exit `0`; exit `1` is
+reserved for a constraint `FAIL` (and `doctor` unhealthy). `witness query` and
+`count` accept `--outcome`, `--command` (and `query` accepts `--limit`) to narrow
+the records. Scripts under `set -e` guard a constraint `FAIL` with
+`|| [ $? -eq 1 ]`; they no longer need a guard for an empty witness read.
 
 The implicit witness ledger path is `~/.cmdrvl/state/witness/witness.jsonl`.
 `EPISTEMIC_WITNESS` remains an explicit operator override. On first use without
@@ -1209,6 +1218,12 @@ embedded schema health, available doctor capabilities, compact robot docs, and
 machine-readable triage without reading datasets, loading DuckDB, executing
 rules, opening the witness ledger, appending witness records, creating
 directories, writing output artifacts, or offering `doctor --fix`.
+
+Every doctor report is `cmdrvl.doctor.v1` (`health`, `capabilities`, `triage`
+modes). `doctor` exits `0` healthy, `1` unhealthy, `2` for usage errors only.
+`doctor capabilities --json` embeds the `operator.v1` contract, which is the same
+document `verify capabilities --json` and `verify --describe` print.
+`--robot-triage` (top level and under `doctor`) remains a deprecated alias.
 
 ## Execution contexts
 

@@ -58,9 +58,10 @@ fn doctor_health_json_is_read_only() {
     assert_witness_absent(&witness);
 
     let payload = parse_stdout(&output.stdout);
-    assert_eq!(payload["schema"], "verify.doctor.health.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "health");
     assert_eq!(payload["tool"], "verify");
-    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["healthy"], true);
     assert_eq!(payload["witness"]["opened"], false);
     assert_eq!(payload["witness"]["appended"], false);
     assert_eq!(payload["witness"]["directory_created"], false);
@@ -90,7 +91,9 @@ fn doctor_capabilities_json_advertises_no_fixers_or_side_effects() {
     assert_witness_absent(&witness);
 
     let payload = parse_stdout(&output.stdout);
-    assert_eq!(payload["schema"], "verify.doctor.capabilities.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "capabilities");
+    assert_eq!(payload["contract"]["schema_version"], "operator.v1");
     assert_eq!(payload["fixers"].as_array().map(Vec::len), Some(0));
     assert_eq!(payload["config_footprint"]["self_contained"], true);
 
@@ -115,10 +118,18 @@ fn doctor_robot_triage_json_is_machine_readable() {
     assert_witness_absent(&witness);
 
     let payload = parse_stdout(&output.stdout);
-    assert_eq!(payload["schema"], "verify.doctor.triage.v1");
-    assert_eq!(payload["ok"], true);
-    assert_eq!(payload["summary"]["failed_checks"], 0);
-    assert_eq!(payload["findings"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "triage");
+    assert_eq!(payload["healthy"], true);
+    assert_eq!(payload["next_actions"], serde_json::json!([]));
+    assert!(
+        payload["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .all(|finding| finding["severity"] == "info"),
+        "a healthy doctor has no warning or error findings"
+    );
     assert_eq!(
         payload["config_footprint"]["deprecation_notices"],
         "~/.cmdrvl/notices/deprecated-paths.jsonl"
@@ -139,9 +150,10 @@ fn top_level_robot_triage_json_is_machine_readable_and_read_only() {
     assert_witness_absent(&witness);
 
     let payload = parse_stdout(&output.stdout);
-    assert_eq!(payload["schema"], "verify.doctor.triage.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "triage");
     assert_eq!(payload["tool"], "verify");
-    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["healthy"], true);
     assert_eq!(payload["side_effects"]["loads_duckdb"], false);
 }
 
@@ -158,38 +170,27 @@ fn top_level_capabilities_json_describes_standard_agent_surfaces() {
     assert_witness_absent(&witness);
 
     let payload = parse_stdout(&output.stdout);
-    assert_eq!(payload["schema"], "verify.capabilities.v1");
-    assert_eq!(
-        payload["standard_agent_surfaces"]["robot_triage"],
-        "verify --robot-triage"
-    );
-    assert_eq!(
-        payload["standard_agent_surfaces"]["capabilities_json"],
-        "verify capabilities --json"
-    );
-    assert_eq!(
-        payload["standard_agent_surfaces"]["operator_contract"],
-        "verify --describe"
-    );
-    assert_eq!(payload["protocols"]["operator"], "operator.v0");
-    assert!(
-        payload["commands"]
-            .as_array()
-            .expect("commands should be an array")
-            .iter()
-            .any(|command| command["command"] == "verify --describe"
-                && command["stdout"] == "operator.v0 JSON")
-    );
-    assert!(
-        payload["commands"]
-            .as_array()
-            .expect("commands should be an array")
-            .iter()
-            .any(|command| command["command"]
-                == "verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--json] [--no-witness]"
-                && command["domain_outcomes"]["1"] == "FAIL")
-    );
-    assert_eq!(payload["doctor"]["schema"], "verify.doctor.capabilities.v1");
+    // `capabilities --json` is now the operator.v1 document (same as `--describe`).
+    assert_eq!(payload["schema_version"], "operator.v1");
+    let surfaces = &payload["capabilities"]["agent_surfaces"];
+    assert_eq!(surfaces["robot_triage"], "verify --robot-triage");
+    assert_eq!(surfaces["doctor_triage"], "verify doctor triage --json");
+    assert_eq!(surfaces["capabilities"], "verify capabilities --json");
+    assert_eq!(surfaces["operator_contract"], "verify --describe");
+    let command_names: Vec<&str> = payload["commands"]
+        .as_array()
+        .expect("commands should be an array")
+        .iter()
+        .filter_map(|command| command["name"].as_str())
+        .collect();
+    for required in ["capabilities", "robot-docs", "doctor", "run", "witness"] {
+        assert!(
+            command_names.contains(&required),
+            "missing command {required}"
+        );
+    }
+    assert_eq!(payload["exit_codes"]["0"]["domain"], "positive");
+    assert_eq!(payload["exit_codes"]["2"]["domain"], "error");
     assert_eq!(
         payload["composition"]["input_boundary"]["relation_state"],
         "already_canonical"
@@ -244,9 +245,9 @@ fn operator_json_is_valid_and_mentions_crv1_boundary() {
     let manifest: Value =
         serde_json::from_str(OPERATOR_JSON).expect("operator.json should be valid JSON");
 
-    assert_eq!(manifest["schema_version"], "operator.v0");
+    assert_eq!(manifest["schema_version"], "operator.v1");
     assert_eq!(manifest["name"], "verify");
-    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["tool_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["capabilities"]["profile_aware"], false);
     assert_eq!(manifest["capabilities"]["header_rewriting"], false);
     assert_eq!(
@@ -279,9 +280,9 @@ fn describe_emits_operator_manifest_and_is_read_only() {
     assert_witness_absent(&witness);
 
     let manifest = parse_stdout(&output.stdout);
-    assert_eq!(manifest["schema_version"], "operator.v0");
+    assert_eq!(manifest["schema_version"], "operator.v1");
     assert_eq!(manifest["name"], "verify");
-    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["tool_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["capabilities"]["profile_aware"], false);
     assert_eq!(
         manifest["capabilities"]["agent_surfaces"]["operator_contract"],

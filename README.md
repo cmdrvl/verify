@@ -84,21 +84,28 @@ Inspect the embedded schemas and local witness log:
 Inspect the read-only doctor surface for agents and automation:
 
 ```bash
-./target/release/verify --robot-triage
+./target/release/verify doctor triage --json
 ./target/release/verify capabilities --json
 ./target/release/verify robot-docs guide
 ./target/release/verify --describe
 ./target/release/verify doctor health
 ./target/release/verify doctor capabilities --json
 ./target/release/verify doctor robot-docs
-./target/release/verify doctor --robot-triage
 ```
 
-`verify --robot-triage` is the fastest read-only machine entrypoint for
-automation. `verify capabilities --json` exposes the stable command contract,
-domain exit codes, witness behavior, protocol versions, and CRV1 canonical
-relation boundary. `verify robot-docs guide` prints the agent-facing quick
-guide. `verify --describe` prints the compiled `operator.v0` manifest.
+`verify doctor triage --json` is the fastest read-only machine entrypoint for
+automation. `verify capabilities --json` prints the `operator.v1` contract:
+the same document as `verify --describe` (exit codes, witness behavior, formats,
+side effects, pipeline, CRV1 canonical relation boundary). `verify robot-docs
+guide` prints the agent-facing quick guide. Every doctor report is
+`cmdrvl.doctor.v1`; the doctor exits `0` when healthy, `1` when unhealthy, and
+`2` only for usage errors.
+
+Deprecated aliases, still working: `verify --robot-triage` and
+`verify doctor --robot-triage` (both mean `doctor triage --json`). The old
+per-tool schema ids (`verify.doctor.{health,capabilities,triage}.v1`,
+`verify.capabilities.v1`) are replaced by `cmdrvl.doctor.v1` and `operator.v1`;
+key on `schema_version`.
 
 ---
 
@@ -190,6 +197,27 @@ Outcome discipline:
 - `FAIL` means at least one rule result failed
 - `REFUSAL` means no partial "best effort" report masquerades as evaluation
 
+Other exit codes, per the family contract (`spine-rules/docs/exit-codes.md`):
+
+- `verify doctor` exits `1` when it finds an unhealthy diagnostic (this was `2`
+  before 0.5.2; `2` now means a usage error only). Under the contract `1` is
+  therefore "FAIL (doctor: unhealthy)".
+- Read commands never exit `1` for an empty result. `verify witness query`
+  prints `[]`, `witness count` prints `{"count":0}` and `witness last` prints
+  `null`, all with exit `0` (this was exit `1` before 0.5.2). Narrow a query with
+  `--outcome PASS|FAIL|REFUSAL`, `--command run|compile|...` and `--limit N`.
+
+`set -e` scripts: a constraint `FAIL` is exit `1` by design and aborts the
+script. Guard it when you want to read the report afterwards:
+
+```bash
+verify run constraints.verify.json --bind input=data.csv --json > report.json || [ $? -eq 1 ]
+```
+
+A `witness query` on an empty ledger no longer needs that guard. A mistyped
+subcommand (`verify docter`) is refused with exit `2` and a "did you mean
+`doctor`" hint instead of being parsed as a dataset path.
+
 ---
 
 ## Commands
@@ -200,14 +228,15 @@ verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected
 verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
 verify compile --schema
 verify validate <COMPILED_CONSTRAINTS> [--json]
-verify witness [ACTION] [--json]
-verify --robot-triage
+verify witness <query|last|count> [--outcome <OUTCOME>] [--command <COMMAND>] [--limit <N>] [--json]
+verify doctor triage --json
 verify capabilities --json
 verify robot-docs guide
 verify doctor health [--json]
 verify doctor capabilities --json
 verify doctor robot-docs
-verify doctor --robot-triage
+verify --robot-triage          # deprecated alias of `doctor triage --json`
+verify doctor --robot-triage   # deprecated alias of `doctor triage --json`
 verify --schema
 verify --describe
 ```
