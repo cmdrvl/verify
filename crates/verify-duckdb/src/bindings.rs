@@ -218,6 +218,12 @@ pub enum BatchBindingError {
     OpenConnection {
         source: duckdb::Error,
     },
+    /// Locking down external access after the bindings were loaded failed. The
+    /// run is refused: evaluating rules on an unlocked connection would let a rule
+    /// file read or write host files.
+    Lockdown {
+        source: duckdb::Error,
+    },
     Io {
         binding: String,
         path: PathBuf,
@@ -259,7 +265,10 @@ impl BatchBindingError {
 
     pub fn refusal_code(&self) -> RefusalCode {
         match self {
-            Self::OpenConnection { .. } | Self::Io { .. } | Self::Load { .. } => RefusalCode::Io,
+            Self::OpenConnection { .. }
+            | Self::Lockdown { .. }
+            | Self::Io { .. }
+            | Self::Load { .. } => RefusalCode::Io,
             Self::DuplicateBinding { .. } => RefusalCode::DuplicateBinding,
             Self::MissingBinding { .. } => RefusalCode::MissingBinding,
             Self::UndeclaredBinding { .. } => RefusalCode::UndeclaredBinding,
@@ -275,6 +284,7 @@ impl BatchBindingError {
     pub fn detail(&self) -> serde_json::Value {
         match self {
             Self::OpenConnection { .. } => json!({}),
+            Self::Lockdown { .. } => json!({ "stage": "lockdown" }),
             Self::Io { binding, path, .. } => json!({
                 "binding": binding,
                 "path": path.to_string_lossy(),
@@ -323,6 +333,10 @@ impl std::fmt::Display for BatchBindingError {
             Self::OpenConnection { .. } => {
                 write!(formatter, "failed to open in-memory DuckDB connection")
             }
+            Self::Lockdown { .. } => write!(
+                formatter,
+                "failed to lock down DuckDB external access after loading bindings"
+            ),
             Self::Io { binding, path, .. } => write!(
                 formatter,
                 "binding {binding} is unreadable: {}",
@@ -374,7 +388,7 @@ impl std::fmt::Display for BatchBindingError {
 impl std::error::Error for BatchBindingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::OpenConnection { source } => Some(source),
+            Self::OpenConnection { source } | Self::Lockdown { source } => Some(source),
             Self::Io { source, .. } => Some(source),
             Self::Load { source, .. } => Some(source),
             Self::DuplicateBinding { .. }

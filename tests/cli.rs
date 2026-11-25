@@ -523,6 +523,113 @@ fn witness_empty_ledger_is_success_with_a_zero_count() {
 }
 
 // ---------------------------------------------------------------------------
+// Hostile inputs (bd-16h): refused with a typed code and no side effect
+// ---------------------------------------------------------------------------
+
+fn write_query_constraints(ledger: &TestLedger, query: &str) -> PathBuf {
+    let constraints = serde_json::json!({
+        "version": "verify.constraint.v1",
+        "constraint_set_id": "hostile.query",
+        "bindings": [{"name": "property", "kind": "relation", "key_fields": ["property_id"]}],
+        "rules": [{
+            "id": "HOSTILE",
+            "severity": "error",
+            "portability": "batch_only",
+            "check": {"op": "query_zero_rows", "bindings": ["property"], "query": query}
+        }]
+    });
+    let path = ledger.root.join("hostile.verify.json");
+    fs::write(&path, constraints.to_string()).expect("write constraints");
+    path
+}
+
+fn run_refusal_json(constraints: &std::path::Path, bind: &str) -> (std::process::Output, Value) {
+    let output = verify_command()
+        .args([
+            "run",
+            &constraints.to_string_lossy(),
+            "--bind",
+            bind,
+            "--json",
+            "--no-witness",
+        ])
+        .output()
+        .expect("verify run should execute");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    (output, report)
+}
+
+#[test]
+fn hostile_query_rules_are_refused_by_the_binary_without_side_effects() {
+    let ledger = TestLedger::new("hostile-rules");
+    let exfil = ledger.root.join("exfil.csv");
+    let attached = ledger.root.join("attached.db");
+    let bind = format!(
+        "property={}",
+        fixture("fixtures/inputs/arity_n/property.csv")
+    );
+
+    for query in [
+        format!("COPY (SELECT * FROM property) TO '{}'", exfil.display()),
+        format!("ATTACH '{}' AS other", attached.display()),
+        "SELECT * FROM read_csv_auto('/etc/hosts')".to_owned(),
+        "SELECT * FROM 'https://127.0.0.1:9/x.csv'".to_owned(),
+        "SET enable_external_access = true".to_owned(),
+        "SELECT 1 WHERE false; DELETE FROM property".to_owned(),
+    ] {
+        let constraints = write_query_constraints(&ledger, &query);
+        let (output, report) = run_refusal_json(&constraints, &bind);
+        assert_eq!(output.status.code(), Some(2), "{query}");
+        assert_eq!(report["outcome"], "REFUSAL", "{query}: {report}");
+        assert_eq!(
+            report["refusal"]["code"], "E_BAD_CONSTRAINTS",
+            "{query}: {report}"
+        );
+    }
+    assert!(!exfil.exists(), "a refused COPY must not write a file");
+    assert!(
+        !attached.exists(),
+        "a refused ATTACH must not create a file"
+    );
+}
+
+#[test]
+fn url_and_glob_bind_paths_are_refused_before_any_io() {
+    let ledger = TestLedger::new("hostile-binds");
+    let constraints = write_query_constraints(&ledger, "SELECT 1 WHERE false");
+    for bind in [
+        "property=https://127.0.0.1:9/x.csv".to_owned(),
+        "property=s3://bucket/x.parquet".to_owned(),
+        "property=http://127.0.0.1:9/x.csv".to_owned(),
+        format!("property={}", fixture("fixtures/inputs/arity_n/*.csv")),
+    ] {
+        let (output, report) = run_refusal_json(&constraints, &bind);
+        assert_eq!(output.status.code(), Some(2), "{bind}");
+        assert_eq!(report["refusal"]["code"], "E_IO", "{bind}: {report}");
+    }
+}
+
+#[test]
+fn a_legitimate_query_rule_still_runs_through_the_binary() {
+    let ledger = TestLedger::new("legit-query");
+    let constraints = write_query_constraints(
+        &ledger,
+        "SELECT property_id AS key__property_id FROM property WHERE tenant_id = 'T-999'",
+    );
+    let bind = format!(
+        "property={}",
+        fixture("fixtures/inputs/arity_n/property.csv")
+    );
+    let (output, report) = run_refusal_json(&constraints, &bind);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "FAIL, not a refusal: {report}"
+    );
+    assert_eq!(report["outcome"], "FAIL");
+}
+
+// ---------------------------------------------------------------------------
 // Arity-N (multi-binding) end-to-end tests
 // ---------------------------------------------------------------------------
 
