@@ -7,7 +7,10 @@ use verify_core::{
     report::{AffectedEntry, ResultStatus, RuleResult},
 };
 
-use crate::{Relation, scalar::value_category};
+use crate::{
+    Relation,
+    scalar::{value_category, value_type},
+};
 
 pub const PORTABLE_RELATION_OPS: &[&str] = &["row_count", "aggregate_compare", "foreign_key"];
 
@@ -307,6 +310,8 @@ fn evaluate_comparison(
     observed: &Value,
     compare: &Comparison,
 ) -> Result<bool, RelationEngineError> {
+    check_threshold_types(observed, compare)?;
+
     let predicates = [
         compare
             .eq
@@ -353,6 +358,35 @@ fn evaluate_comparison(
             "comparison requires at least one operator".to_owned(),
         ))
     }
+}
+
+/// Every threshold must have the observed value's scalar type, and null matches none. All
+/// operators are checked before any is decided, so a false one cannot hide a mistyped one.
+fn check_threshold_types(
+    observed: &Value,
+    compare: &Comparison,
+) -> Result<(), RelationEngineError> {
+    let thresholds = [
+        ("eq", &compare.eq),
+        ("ne", &compare.ne),
+        ("gt", &compare.gt),
+        ("gte", &compare.gte),
+        ("lt", &compare.lt),
+        ("lte", &compare.lte),
+    ];
+    for (operator, threshold) in thresholds {
+        let Some(threshold) = threshold else {
+            continue;
+        };
+        if threshold.is_null() || value_category(threshold) != value_category(observed) {
+            return Err(RelationEngineError::BadExpression(format!(
+                "{operator} cannot compare an observed {} with a threshold of type {}",
+                value_type(observed),
+                value_type(threshold)
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn compare_eq(
@@ -974,6 +1008,191 @@ mod tests {
                     );
                     rows.reverse();
                 }
+            }
+        }
+    }
+
+    /// Parsed as an artifact's `compare` is, so an explicit null stays one.
+    fn comparison(compare: Value) -> Comparison {
+        serde_json::from_value(compare).expect("comparison parses")
+    }
+
+    fn with_threshold(operator: &str, threshold: &Value) -> serde_json::Map<String, Value> {
+        let mut compare = serde_json::Map::new();
+        compare.insert(operator.to_owned(), threshold.clone());
+        compare
+    }
+
+    const OPERATORS: [&str; 6] = ["eq", "ne", "gt", "gte", "lt", "lte"];
+
+    fn assert_threshold_refused(observed: &Value, compare: Value) {
+        let outcome = super::evaluate_comparison(observed, &comparison(compare.clone()));
+        assert!(
+            matches!(&outcome, Err(RelationEngineError::BadExpression(message))
+                if message.contains("cannot compare")),
+            "observed {observed} with {compare}: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn wrong_typed_thresholds_refuse_for_every_operator() {
+        let cases = [
+            (
+                json!(10),
+                vec![
+                    json!("10"),
+                    json!("x"),
+                    json!(true),
+                    json!(false),
+                    Value::Null,
+                    json!([10]),
+                    json!([]),
+                    json!({}),
+                ],
+            ),
+            (
+                json!("10"),
+                vec![
+                    json!(10),
+                    json!(true),
+                    Value::Null,
+                    json!(["10"]),
+                    json!({}),
+                ],
+            ),
+            (
+                json!(false),
+                vec![
+                    json!(0),
+                    json!("false"),
+                    Value::Null,
+                    json!([false]),
+                    json!({}),
+                ],
+            ),
+        ];
+
+        for (observed, thresholds) in &cases {
+            for threshold in thresholds {
+                for operator in OPERATORS {
+                    let compare = with_threshold(operator, threshold);
+                    assert_threshold_refused(observed, Value::Object(compare.clone()));
+                    let mut tolerated = compare;
+                    tolerated.insert("tolerance".to_owned(), json!(100));
+                    assert_threshold_refused(observed, Value::Object(tolerated));
+                }
+            }
+        }
+    }
+
+    /// One mistyped operator refuses the comparison wherever it sits and whatever the others
+    /// decide.
+    #[test]
+    fn every_operator_is_type_checked_before_a_verdict() {
+        for wrong in OPERATORS {
+            for right in OPERATORS {
+                if wrong == right {
+                    continue;
+                }
+                // Among these thresholds each well-typed operator is true once and false once.
+                for threshold in [json!(5), json!(10), json!(15)] {
+                    for mistyped in [json!("x"), Value::Null, json!([10])] {
+                        let mut compare = with_threshold(wrong, &mistyped);
+                        compare.insert(right.to_owned(), threshold.clone());
+                        assert_threshold_refused(&json!(10), Value::Object(compare));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn same_type_comparisons_are_unchanged() {
+        for (observed, below, equal, above) in [
+            (json!(10), json!(9), json!(10.0), json!(11)),
+            (json!("m"), json!("a"), json!("m"), json!("z")),
+        ] {
+            for (threshold, holds) in [
+                (&below, [false, true, true, true, false, false]),
+                (&equal, [true, false, false, true, false, true]),
+                (&above, [false, true, false, false, true, true]),
+            ] {
+                for (operator, expected) in OPERATORS.into_iter().zip(holds) {
+                    let compare = Value::Object(with_threshold(operator, threshold));
+                    assert_eq!(
+                        super::evaluate_comparison(&observed, &comparison(compare.clone())),
+                        Ok(expected),
+                        "observed {observed} with {compare}"
+                    );
+                }
+            }
+        }
+        for (threshold, holds) in [
+            (false, [false, true, true, true, false, false]),
+            (true, [true, false, false, true, false, true]),
+        ] {
+            for (operator, expected) in OPERATORS.into_iter().zip(holds) {
+                let compare = Value::Object(with_threshold(operator, &json!(threshold)));
+                assert_eq!(
+                    super::evaluate_comparison(&json!(true), &comparison(compare)),
+                    Ok(expected),
+                    "observed true with {operator} {threshold}"
+                );
+            }
+        }
+        for (observed, compare, expected) in [
+            (json!(10), json!({ "gte": 5, "lte": 99 }), true),
+            (json!(10), json!({ "gte": 5, "lte": 9 }), false),
+            (json!(10), json!({ "eq": 12, "tolerance": 2 }), true),
+            (json!(10), json!({ "ne": 12, "tolerance": 2 }), false),
+            // A tolerance stays ignored by ordering operators and by strings.
+            (json!(10), json!({ "gt": 10, "tolerance": 5 }), false),
+            (json!("10"), json!({ "eq": "11", "tolerance": 5 }), false),
+        ] {
+            assert_eq!(
+                super::evaluate_comparison(&observed, &comparison(compare.clone())),
+                Ok(expected),
+                "observed {observed} with {compare}"
+            );
+        }
+        assert!(matches!(
+            super::evaluate_comparison(&json!(10), &comparison(json!({}))),
+            Err(RelationEngineError::BadExpression(message))
+                if message.contains("at least one operator")
+        ));
+    }
+
+    #[test]
+    fn row_count_and_every_aggregate_refuse_a_wrong_typed_threshold() {
+        let relations = relations_with(
+            "input",
+            &[],
+            vec![row(&[("v", json!(9))]), row(&[("v", json!(10))])],
+        );
+        let mut checks = vec![json!({ "op": "row_count", "binding": "input" })];
+        for function in ["min", "max", "sum", "avg"] {
+            let mut aggregate = serde_json::Map::new();
+            aggregate.insert(function.to_owned(), json!("v"));
+            checks.push(
+                json!({ "op": "aggregate_compare", "binding": "input", "aggregate": aggregate }),
+            );
+        }
+
+        for check in checks {
+            for operator in OPERATORS {
+                let mut check = check.clone();
+                check["compare"] = Value::Object(with_threshold(operator, &json!("x")));
+                let rule = make_rule(
+                    "THRESHOLD",
+                    Severity::Error,
+                    serde_json::from_value(check.clone()).expect("check parses"),
+                );
+                let outcome = evaluate_rule(&rule, &relations);
+                assert!(
+                    matches!(&outcome, Err(RelationEngineError::BadExpression(message))
+                        if message.contains("cannot compare")),
+                    "{check}: {outcome:?}"
+                );
             }
         }
     }

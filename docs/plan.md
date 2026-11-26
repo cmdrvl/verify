@@ -428,6 +428,24 @@ lowered into portable ops or implemented as a dedicated portable rule kind.
 
 Portable op semantics must be executable without DuckDB-specific query text.
 
+#### Comparison thresholds
+
+These rules apply to the `compare` object of `row_count` and
+`aggregate_compare`:
+
+- a threshold must have the scalar type of the observed value: number with
+  number, string with string, boolean with boolean; the observed row count is a
+  number
+- any other threshold refuses with `E_BAD_EXPR`, for every operator; it must not
+  become a pass or a fail
+- this includes null, arrays, and objects
+- an explicit null is a threshold, not an absent operator: it refuses alone or
+  beside other operators, and it is preserved when the artifact is serialized
+- every declared operator is type-checked before any of them is decided, so a
+  false operator cannot hide a mistyped one
+- `tolerance` does not make a threshold of another type comparable
+- portable authoring rejects a null threshold with `E_BAD_AUTHORING`
+
 #### `aggregate_compare` `min` and `max` semantics
 
 These rules govern the value `min` and `max` select:

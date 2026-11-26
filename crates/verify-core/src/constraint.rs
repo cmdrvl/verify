@@ -230,20 +230,53 @@ impl<'de> Deserialize<'de> for MembershipOperand {
     }
 }
 
+/// Keep a threshold written as `null` as `Some(Value::Null)`. Serde would otherwise read it as
+/// an absent operator, and the rule would be decided without it.
+fn deserialize_present_threshold<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Comparison {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub eq: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ne: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gt: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gte: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lt: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_threshold",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lte: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<f64>,
@@ -267,9 +300,40 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Check, ConstraintSet, MembershipOperand, Portability, PredicateExpression, Severity,
+        Check, Comparison, ConstraintSet, MembershipOperand, Portability, PredicateExpression,
+        Severity,
     };
     use crate::CONSTRAINT_VERSION;
+
+    /// A threshold written as `null` is not the same as an operator that is absent: it must
+    /// reach evaluation, where it refuses, and survive serialization.
+    #[test]
+    fn explicit_null_threshold_is_kept_and_an_absent_one_stays_absent() {
+        for operator in ["eq", "ne", "gt", "gte", "lt", "lte"] {
+            for text in [
+                format!(r#"{{"{operator}":null}}"#),
+                format!(r#"{{"{operator}":null,"tolerance":1.0}}"#),
+            ] {
+                let parsed: Comparison = serde_json::from_str(&text).expect("comparison parses");
+                assert_eq!(serde_json::to_string(&parsed).expect("serializes"), text);
+                assert_ne!(parsed, Comparison::default());
+
+                // The artifact is also read from an already parsed JSON value.
+                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+                let from_value: Comparison =
+                    serde_json::from_value(value).expect("comparison parses");
+                assert_eq!(from_value, parsed);
+            }
+        }
+
+        for text in ["{}", r#"{"gte":1}"#, r#"{"eq":"x","tolerance":0.5}"#] {
+            let parsed: Comparison = serde_json::from_str(text).expect("comparison parses");
+            assert_eq!(serde_json::to_string(&parsed).expect("serializes"), text);
+        }
+        let tolerance: Comparison =
+            serde_json::from_str(r#"{"eq":1,"tolerance":null}"#).expect("parses");
+        assert_eq!(tolerance.tolerance, None);
+    }
 
     #[test]
     fn constraint_artifact_round_trips() {

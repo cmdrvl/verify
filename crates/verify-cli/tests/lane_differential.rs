@@ -1348,6 +1348,73 @@ fn min_max_over_a_csv_column_with_an_empty_cell_order_strings() {
     );
 }
 
+/// Every function, every operator and every threshold type that does not match the observed
+/// value refuses in both paths. Batch says `E_BAD_CONSTRAINTS` where the plan says
+/// `E_BAD_EXPR`; that is bd-uj2.
+#[test]
+fn wrong_typed_thresholds_refuse_in_both_paths() {
+    let numbers = single_column(Kind::Int, &[Some("9"), Some("10")]);
+    let strings = single_column(Kind::Text, &[Some("9"), Some("10")]);
+    let booleans = single_column(Kind::Bool, &[Some("true"), Some("false")]);
+    let row_count = json!({ "op": "row_count", "binding": "input" });
+    let over = |function: &str| {
+        let mut check = aggregate(function, "eq", Value::Null);
+        check.as_object_mut().expect("check").remove("compare");
+        check
+    };
+    // (observed column, rule without its comparison, thresholds of another type)
+    let number_thresholds = || {
+        vec![
+            json!("10"),
+            json!(true),
+            Value::Null,
+            json!([10]),
+            json!({}),
+        ]
+    };
+    let mut cases = vec![(&numbers, row_count, number_thresholds())];
+    for function in ["min", "max", "sum", "avg"] {
+        cases.push((&numbers, over(function), number_thresholds()));
+    }
+    for function in ["min", "max"] {
+        cases.push((
+            &strings,
+            over(function),
+            vec![json!(10), json!(true), Value::Null, json!(["10"])],
+        ));
+        cases.push((
+            &booleans,
+            over(function),
+            vec![json!(0), json!("false"), Value::Null, json!([false])],
+        ));
+    }
+
+    for (table, check, thresholds) in cases {
+        for threshold in thresholds {
+            for operator in ["eq", "ne", "gt", "gte", "lt", "lte"] {
+                let mut compare = serde_json::Map::new();
+                compare.insert(operator.to_owned(), threshold.clone());
+                let mut check = check.clone();
+                check["compare"] = Value::Object(compare);
+                let embedded = portable_verdict(
+                    &artifact(&["input"], "portable", check.clone()),
+                    &[("input", table)],
+                );
+                let batch = repro_outcome(&[("input", table)], check.clone());
+                assert_eq!(
+                    (embedded, batch.as_str()),
+                    (
+                        Verdict::Refused("E_BAD_EXPR".to_owned()),
+                        "E_BAD_CONSTRAINTS"
+                    ),
+                    "{check} over {}",
+                    table.show()
+                );
+            }
+        }
+    }
+}
+
 /// Typed batch columns cannot mix scalar types, so only an embedded caller can.
 #[test]
 fn min_max_over_mixed_types_refuse_embedded() {
@@ -1582,6 +1649,12 @@ fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
             };
             let compare = &case.check["compare"];
             let (operator, expected) = first_entry(compare);
+            // A threshold of another type, null included, has no verdict.
+            if std::mem::discriminant(&observed) != std::mem::discriminant(expected)
+                || expected.is_null()
+            {
+                return Some(Verdict::Refused("E_BAD_EXPR".to_owned()));
+            }
             let pass =
                 current_comparison(operator, &observed, expected, compare["tolerance"].as_f64())?;
             Some(Verdict::Decided {

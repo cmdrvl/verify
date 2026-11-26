@@ -497,6 +497,24 @@ fn validate_comparison(rule_id: &str, compare: &Comparison) -> Result<(), Compil
         ));
     }
 
+    let null_threshold = [
+        &compare.eq,
+        &compare.ne,
+        &compare.gt,
+        &compare.gte,
+        &compare.lt,
+        &compare.lte,
+    ]
+    .into_iter()
+    .flatten()
+    .any(Value::is_null);
+    if null_threshold {
+        return Err(bad_authoring(
+            "comparison threshold must not be null",
+            json!({"rule_id": rule_id}),
+        ));
+    }
+
     Ok(())
 }
 
@@ -783,6 +801,31 @@ rules:
             }
             other => Err(format!("expected bad authoring error, got {other:?}")),
         }
+    }
+
+    /// A null threshold can only refuse at run, so authoring rejects it, alone or beside
+    /// another operator. A blank YAML value is a null.
+    #[test]
+    fn rejects_a_null_comparison_threshold() -> Result<(), String> {
+        for compare in [
+            "{ ne: null }",
+            "{ eq: ~ }",
+            "{ gt: }",
+            "{ gte: 5, ne: null }",
+            "{ lte: null, tolerance: 1 }",
+        ] {
+            for op in [
+                "row_count",
+                "aggregate_compare\n    aggregate: { max: value }",
+            ] {
+                let source = format!(
+                    "constraint_set_id: invalid.null_threshold\nbindings:\n  input: {{}}\nrules:\n  - id: THRESHOLD\n    severity: error\n    binding: input\n    op: {op}\n    compare: {compare}\n"
+                );
+                let detail = bad_authoring_detail(&source, "a null threshold should be rejected")?;
+                assert_eq!(detail["rule_id"], "THRESHOLD", "{op} {compare}: {detail}");
+            }
+        }
+        Ok(())
     }
 
     #[test]
