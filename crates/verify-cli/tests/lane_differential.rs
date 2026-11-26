@@ -1269,12 +1269,7 @@ fn arm_s_row_count_matches_duckdb() {
 
 #[test]
 fn arm_s_aggregate_compare_matches_duckdb() {
-    run_oracle_arm(
-        0x55,
-        600,
-        aggregate_case,
-        &[BEAD_F64_ROUNDING, BEAD_SIGNED_ZERO_ORDER],
-    );
+    run_oracle_arm(0x55, 600, aggregate_case, &[BEAD_F64_ROUNDING]);
 }
 
 /// No case here can trigger a filed defect, so the lanes must agree on every one.
@@ -1541,6 +1536,119 @@ fn one_step_and_compile_then_run_agree_on_tolerances() {
     }
 }
 
+/// `-0.0` equals `0.0` wherever numbers are compared: portable predicates, the DuckDB
+/// binding lane, thresholds over aggregates and the row count, and binding keys.
+#[test]
+fn signed_zeros_compare_as_equal_in_every_lane() {
+    let directory = tempdir().expect("scratch");
+    let decides_equal = [
+        ("eq", true),
+        ("ne", false),
+        ("gt", false),
+        ("gte", true),
+        ("lt", false),
+        ("lte", true),
+    ];
+    let one = |operator: &str, operands: Value| {
+        let mut expression = serde_json::Map::new();
+        expression.insert(operator.to_owned(), operands);
+        Value::Object(expression)
+    };
+    let passes = |verdict: &Verdict| matches!(verdict, Verdict::Decided { pass: true, .. });
+
+    for stored in ["-0.0", "0.0"] {
+        for other in ["-0.0", "0.0"] {
+            let table = Table {
+                columns: vec![("id", Kind::Text), ("v", Kind::Double), ("w", Kind::Double)],
+                rows: vec![vec![
+                    cell(Kind::Text, "r0"),
+                    cell(Kind::Double, stored),
+                    cell(Kind::Double, other),
+                ]],
+            };
+            let path = directory.path().join("zeros.parquet");
+            table.write_parquet(&path);
+            let literal = number(other);
+
+            for (operator, holds) in decides_equal {
+                let context = format!("{stored} {operator} {other}");
+
+                // The binding-qualified evaluator: column to column, and column to literal.
+                for operands in [
+                    json!([{ "column": "v" }, { "binding": "twin", "column": "w" }]),
+                    json!([{ "binding": "twin", "column": "v" }, literal]),
+                ] {
+                    let verdict =
+                        duckdb_predicate_verdict(&twin_artifact(&one(operator, operands)), &path);
+                    assert_eq!(passes(&verdict), holds, "binding lane: {context}");
+                }
+
+                let mut checks = vec![predicate(operator, literal.clone())];
+                for function in ["min", "max", "sum", "avg"] {
+                    checks.push(aggregate(function, operator, literal.clone()));
+                }
+                for check in checks {
+                    let embedded = portable_verdict(
+                        &artifact(&["input"], "portable", check.clone()),
+                        &[("input", &table)],
+                    );
+                    assert_eq!(passes(&embedded), holds, "embedded: {context} {check}");
+                    assert_eq!(
+                        repro_outcome(&[("input", &table)], check.clone()),
+                        if holds { "PASS" } else { "FAIL" },
+                        "batch: {context} {check}"
+                    );
+                }
+            }
+        }
+    }
+
+    // A row count of zero is the same zero.
+    let empty = single_column(Kind::Int, &[]);
+    for (operator, holds) in decides_equal {
+        let mut compare = serde_json::Map::new();
+        compare.insert(operator.to_owned(), json!(-0.0));
+        let check = json!({ "op": "row_count", "binding": "input", "compare": compare });
+        let embedded = portable_verdict(
+            &artifact(&["input"], "portable", check.clone()),
+            &[("input", &empty)],
+        );
+        assert_eq!(passes(&embedded), holds, "embedded row_count {operator}");
+        assert_eq!(
+            repro_outcome(&[("input", &empty)], check),
+            if holds { "PASS" } else { "FAIL" },
+            "batch row_count {operator}"
+        );
+    }
+
+    // Binding keys: a -0.0 key finds its 0.0 counterpart.
+    let keyed = |zero: &str| Table {
+        columns: vec![("id", Kind::Double), ("v", Kind::Int)],
+        rows: vec![vec![cell(Kind::Double, zero), cell(Kind::Int, "1")]],
+    };
+    let (left, right) = (keyed("-0.0"), keyed("0.0"));
+    let paths = [
+        directory.path().join("left.parquet"),
+        directory.path().join("right.parquet"),
+    ];
+    left.write_parquet(&paths[0]);
+    right.write_parquet(&paths[1]);
+    let constraints = artifact(
+        &["input", "other"],
+        "batch_only",
+        json!({
+            "op": "predicate", "binding": "input",
+            "expr": { "eq": [{ "column": "v" }, { "binding": "other", "column": "v" }] },
+        }),
+    );
+    let report = cli_report(
+        directory.path(),
+        &constraints,
+        &[("input", &paths[0]), ("other", &paths[1])],
+    );
+    assert_eq!(essence_text(&report), "PASS");
+}
+
 /// Typed batch columns cannot mix scalar types, so only an embedded caller can.
 #[test]
 fn min_max_over_mixed_types_refuse_embedded() {
@@ -1562,12 +1670,7 @@ fn min_max_over_mixed_types_refuse_embedded() {
 
 #[test]
 fn arm_s_row_predicate_matches_duckdb() {
-    run_oracle_arm(
-        0x56,
-        600,
-        row_predicate_case,
-        &[BEAD_F64_ROUNDING, BEAD_SIGNED_ZERO_ORDER],
-    );
+    run_oracle_arm(0x56, 600, row_predicate_case, &[BEAD_F64_ROUNDING]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,7 +1680,6 @@ fn arm_s_row_predicate_matches_duckdb() {
 // ---------------------------------------------------------------------------
 
 const BEAD_F64_ROUNDING: &str = "bd-1t5";
-const BEAD_SIGNED_ZERO_ORDER: &str = "bd-der";
 const BEAD_NUMBER_TEXT_IDENTITY: &str = "bd-v3r";
 const BEAD_COLUMN_TYPE_PREFLIGHT: &str = "bd-mhl";
 const BEAD_RELATION_REFUSAL_CODE: &str = "bd-uj2";
@@ -1594,10 +1696,10 @@ fn text_identity(value: &Value) -> String {
     }
 }
 
-/// How the engine compares today: numbers as f64, ordered by `total_cmp`.
+/// How the engine compares today: numbers as f64 (so `-0.0` equals `0.0`).
 fn current_order(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
-        (Value::Number(l), Value::Number(r)) => Some(l.as_f64()?.total_cmp(&r.as_f64()?)),
+        (Value::Number(l), Value::Number(r)) => l.as_f64()?.partial_cmp(&r.as_f64()?),
         (Value::String(l), Value::String(r)) => Some(l.cmp(r)),
         (Value::Bool(l), Value::Bool(r)) => Some(l.cmp(r)),
         _ => None,
@@ -1868,16 +1970,6 @@ fn oracle_defect_triggers(case: &OracleCase) -> Vec<&'static str> {
         .is_some_and(|v| v.unsigned_abs() >= (1 << 53));
     if wide_literal || cells.iter().any(|(kind, cell)| beyond_f64(*kind, cell)) {
         triggers.push(BEAD_F64_ROUNDING);
-    }
-    let ordered = match case.label {
-        "predicate" => !matches!(first_entry(&case.check["expr"]).0, "eq" | "ne"),
-        "aggregate_compare" => !matches!(first_entry(&case.check["compare"]).0, "eq" | "ne"),
-        _ => false,
-    };
-    if ordered
-        && (is_negative_zero(&literal) || cells.iter().any(|(_, c)| is_negative_zero(&c.json)))
-    {
-        triggers.push(BEAD_SIGNED_ZERO_ORDER);
     }
     if matches!(case.label, "unique" | "foreign_key")
         && cells.iter().any(|(_, a)| {
@@ -2422,7 +2514,6 @@ fn repro_wide_numbers_compare_exactly() {
 }
 
 #[test]
-#[ignore = "bd-der: -0.0 is ordered below 0.0 although it equals it"]
 fn repro_negative_zero_is_not_below_zero() {
     let table = single_column(Kind::Double, &[Some("-0.0")]);
     let below = repro_outcome(&[("input", &table)], predicate("lt", json!(0.0)));

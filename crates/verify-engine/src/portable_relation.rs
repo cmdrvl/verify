@@ -551,9 +551,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
 
 fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
-        (Value::Number(l), Value::Number(r)) => {
-            l.as_f64().zip(r.as_f64()).map(|(lf, rf)| lf.total_cmp(&rf))
-        }
+        // By f64 value: `-0.0` equals `0.0`, as in `values_equal`.
+        (Value::Number(l), Value::Number(r)) => l
+            .as_f64()
+            .zip(r.as_f64())
+            .and_then(|(lf, rf)| lf.partial_cmp(&rf)),
         (Value::String(l), Value::String(r)) => Some(l.cmp(r)),
         (Value::Bool(l), Value::Bool(r)) => Some(l.cmp(r)),
         (Value::Null, Value::Null) => Some(Ordering::Equal),
@@ -1296,6 +1298,71 @@ mod tests {
                 matches!(&outcome, Err(RelationEngineError::BadExpression(message))
                     if message.contains("tolerance must be a finite number")),
                 "{check}: {outcome:?}"
+            );
+        }
+    }
+
+    /// Thresholds are ordered by their own comparison, apart from the predicates' one.
+    #[test]
+    fn signed_zero_thresholds_compare_as_equal() {
+        // What each of eq, ne, gt, gte, lt, lte decides between two equal numbers.
+        let equal = [true, false, false, true, false, true];
+        let zeros = [json!(-0.0), json!(0.0), json!(0)];
+        for observed in &zeros {
+            for threshold in &zeros {
+                for (operator, expected) in OPERATORS.into_iter().zip(equal) {
+                    for tolerance in [None, Some(json!(0)), Some(json!(-0.0))] {
+                        // A tolerance changes eq and ne only, and a zero one not at all here.
+                        let mut compare = with_threshold(operator, threshold);
+                        if let Some(tolerance) = tolerance {
+                            compare.insert("tolerance".to_owned(), tolerance);
+                        }
+                        assert_eq!(
+                            super::evaluate_comparison(
+                                observed,
+                                &comparison(Value::Object(compare.clone()))
+                            ),
+                            Ok(expected),
+                            "observed {observed} with {compare:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for (observed, compare, expected) in [
+            (json!(-0.0), json!({ "gt": -5e-324 }), true),
+            (json!(0.0), json!({ "lt": 5e-324 }), true),
+            (json!(-5e-324), json!({ "lt": -0.0 }), true),
+            (json!(5e-324), json!({ "gt": 0.0 }), true),
+        ] {
+            assert_eq!(
+                super::evaluate_comparison(&observed, &comparison(compare.clone())),
+                Ok(expected),
+                "observed {observed} with {compare}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_count_of_zero_rows_equals_negative_zero() {
+        let relations = relations_with("input", &[], Vec::new());
+        for (operator, passes) in OPERATORS
+            .into_iter()
+            .zip([true, false, false, true, false, true])
+        {
+            let rule = make_rule(
+                "EMPTY",
+                Severity::Error,
+                Check::RowCount {
+                    binding: "input".to_owned(),
+                    compare: comparison(Value::Object(with_threshold(operator, &json!(-0.0)))),
+                },
+            );
+            let result = evaluate_rule(&rule, &relations).expect("row_count evaluates");
+            assert_eq!(
+                matches!(result.status, ResultStatus::Pass),
+                passes,
+                "row_count {operator} -0.0 over zero rows"
             );
         }
     }

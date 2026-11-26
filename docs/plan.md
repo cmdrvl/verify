@@ -634,6 +634,14 @@ produce the same refusal semantics. In particular, a numeric cell compared with
 the string literal `"0"` refuses rather than relying on implicit coercion or
 evaluating as unequal.
 
+#### Signed zero
+
+`-0.0` and `0.0` are the same number: they are equal, and neither orders before
+the other. This holds for predicate `eq`, `ne`, `in`, and ordered comparisons in
+the portable and binding-qualified executors, for `compare` thresholds with or
+without a tolerance, for `min` and `max` selection, and for binding-qualified
+key matching.
+
 #### Binding-qualified predicate contract
 
 Binding-qualified predicates extend the same structured predicate grammar over

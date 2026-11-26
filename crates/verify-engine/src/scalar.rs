@@ -72,14 +72,15 @@ pub fn values_equal(left: &Value, right: &Value) -> Result<bool, ScalarCompariso
 }
 
 /// Protocol ordering. Only non-null values in the same scalar category have an
-/// ordering; numbers use the same total f64 ordering as the original portable
-/// evaluator.
+/// ordering. Numbers order by their f64 value, so `-0.0` and `0.0` are equal
+/// here as they are in `values_equal`; a pair with no order (NaN, which a JSON
+/// number cannot hold) is incomparable.
 pub fn compare_values(left: &Value, right: &Value) -> Result<Ordering, ScalarComparisonError> {
     match (left, right) {
         (Value::Number(left_number), Value::Number(right_number)) => left_number
             .as_f64()
             .zip(right_number.as_f64())
-            .map(|(left, right)| left.total_cmp(&right))
+            .and_then(|(left, right)| left.partial_cmp(&right))
             .ok_or_else(|| comparison_error(left, right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
@@ -186,6 +187,40 @@ mod tests {
             compare_values(&json!(1), &json!(2)).expect("numbers are ordered"),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn signed_zeros_are_equal_and_ordered_as_equal() {
+        let zeros = [json!(-0.0), json!(0.0), json!(0)];
+        for left in &zeros {
+            for right in &zeros {
+                assert!(
+                    values_equal(left, right).expect("numbers have equality"),
+                    "{left} == {right}"
+                );
+                assert_eq!(
+                    compare_values(left, right).expect("numbers are ordered"),
+                    Ordering::Equal,
+                    "{left} against {right}"
+                );
+            }
+            // The smallest magnitudes still order around zero.
+            for (other, expected) in [
+                (json!(-5e-324), Ordering::Greater),
+                (json!(5e-324), Ordering::Less),
+            ] {
+                assert_eq!(
+                    compare_values(left, &other).expect("numbers are ordered"),
+                    expected,
+                    "{left} against {other}"
+                );
+                assert_eq!(
+                    compare_values(&other, left).expect("numbers are ordered"),
+                    expected.reverse(),
+                    "{other} against {left}"
+                );
+            }
+        }
     }
 
     #[test]
