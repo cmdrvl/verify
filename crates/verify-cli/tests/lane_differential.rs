@@ -1415,6 +1415,132 @@ fn wrong_typed_thresholds_refuse_in_both_paths() {
     }
 }
 
+/// A negative or null tolerance refuses in both paths for every function and operator,
+/// including the operators and types that ignore a valid one. (JSON cannot carry NaN or the
+/// infinities; authoring is the way in, covered by the one-step test.)
+#[test]
+fn invalid_tolerances_refuse_in_both_paths() {
+    let numbers = single_column(Kind::Int, &[Some("9"), Some("10")]);
+    let strings = single_column(Kind::Text, &[Some("9"), Some("10")]);
+    let row_count = json!({ "op": "row_count", "binding": "input" });
+    let over = |function: &str| {
+        let mut check = aggregate(function, "eq", Value::Null);
+        check.as_object_mut().expect("check").remove("compare");
+        check
+    };
+    let mut cases = vec![(&numbers, row_count, json!(2))];
+    for (function, observed) in [
+        ("min", json!(9)),
+        ("max", json!(10)),
+        ("sum", json!(19)),
+        ("avg", json!(9.5)),
+    ] {
+        cases.push((&numbers, over(function), observed));
+    }
+    cases.push((&strings, over("min"), json!("10")));
+
+    for (table, check, threshold) in cases {
+        for tolerance in [json!(-1), Value::Null] {
+            for operator in ["eq", "ne", "gt", "gte", "lt", "lte"] {
+                let mut compare = serde_json::Map::new();
+                compare.insert(operator.to_owned(), threshold.clone());
+                compare.insert("tolerance".to_owned(), tolerance.clone());
+                let mut check = check.clone();
+                check["compare"] = Value::Object(compare);
+                let embedded = portable_verdict(
+                    &artifact(&["input"], "portable", check.clone()),
+                    &[("input", table)],
+                );
+                let batch = repro_outcome(&[("input", table)], check.clone());
+                assert_eq!(
+                    (embedded, batch.as_str()),
+                    (
+                        Verdict::Refused("E_BAD_EXPR".to_owned()),
+                        "E_BAD_CONSTRAINTS"
+                    ),
+                    "{check} over {}",
+                    table.show()
+                );
+            }
+        }
+    }
+}
+
+/// `verify <data> --rules` and `compile` then `run` must agree on every authored tolerance:
+/// an invalid one is bad authoring both ways, and a valid one gives one verdict.
+#[test]
+fn one_step_and_compile_then_run_agree_on_tolerances() {
+    let directory = tempdir().expect("scratch");
+    let data = directory.path().join("input.jsonl");
+    fs::write(&data, "{\"id\":\"a\",\"v\":9}\n{\"id\":\"b\",\"v\":10}\n").expect("jsonl written");
+    let rules = directory.path().join("rules.yaml");
+
+    // (compare, expected outcome); every `None` is an invalid tolerance.
+    let cases: [(&str, Option<&str>); 12] = [
+        ("{ ne: 10, tolerance: .nan }", None),
+        ("{ eq: 999, tolerance: .inf }", None),
+        ("{ ne: 10, tolerance: -.inf }", None),
+        ("{ ne: 10, tolerance: -1 }", None),
+        ("{ gt: 9, tolerance: -1 }", None),
+        ("{ ne: 10, tolerance: null }", None),
+        ("{ ne: 10, tolerance: }", None),
+        ("{ ne: 10, tolerance: -0.0 }", Some("FAIL")),
+        ("{ ne: 10, tolerance: 0 }", Some("FAIL")),
+        ("{ eq: 999, tolerance: 1.0e+308 }", Some("PASS")),
+        ("{ eq: 11, tolerance: 1 }", Some("PASS")),
+        ("{ gt: 9, tolerance: 5 }", Some("PASS")),
+    ];
+    for (compare, expected) in cases {
+        fs::write(
+            &rules,
+            format!(
+                "constraint_set_id: tests.one_step\nbindings:\n  input:\n    key_fields: [id]\nrules:\n  - id: RULE\n    severity: error\n    binding: input\n    op: aggregate_compare\n    aggregate: {{ max: v }}\n    compare: {compare}\n"
+            ),
+        )
+        .expect("rules written");
+
+        let one_step = Command::new(verify_binary()) // ubs:ignore — test binary path.
+            .arg(&data)
+            .arg("--rules")
+            .arg(&rules)
+            .args(["--json", "--no-witness"])
+            .output()
+            .expect("verify runs");
+        let one_step: Value = serde_json::from_slice(&one_step.stdout).expect("JSON report");
+
+        let compiled = Command::new(verify_binary()) // ubs:ignore — test binary path.
+            .arg("compile")
+            .arg(&rules)
+            .output()
+            .expect("verify compiles");
+
+        match expected {
+            Some(outcome) => {
+                assert!(compiled.status.success(), "{compare}: compile failed");
+                let constraints: ConstraintSet =
+                    serde_json::from_slice(&compiled.stdout).expect("compiled artifact parses");
+                let then_run =
+                    cli_report(directory.path(), &constraints, &[("input", data.as_path())]);
+                assert_eq!(
+                    (essence_text(&one_step), essence_text(&then_run)),
+                    (outcome.to_owned(), outcome.to_owned()),
+                    "{compare}"
+                );
+            }
+            None => {
+                assert_eq!(essence_text(&one_step), "E_BAD_AUTHORING", "{compare}");
+                assert!(!compiled.status.success(), "{compare}: compile accepted it");
+                let said = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&compiled.stdout),
+                    String::from_utf8_lossy(&compiled.stderr)
+                );
+                assert!(said.contains("E_BAD_AUTHORING"), "{compare}: {said}");
+            }
+        }
+    }
+}
+
 /// Typed batch columns cannot mix scalar types, so only an embedded caller can.
 #[test]
 fn min_max_over_mixed_types_refuse_embedded() {
@@ -1649,6 +1775,14 @@ fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
             };
             let compare = &case.check["compare"];
             let (operator, expected) = first_entry(compare);
+            // A declared tolerance that is not a number of zero or more has no verdict. (A
+            // parsed artifact cannot hold a non-finite number.)
+            if compare
+                .get("tolerance")
+                .is_some_and(|tolerance| !tolerance.as_f64().is_some_and(|t| t >= 0.0))
+            {
+                return Some(Verdict::Refused("E_BAD_EXPR".to_owned()));
+            }
             // A threshold of another type, null included, has no verdict.
             if std::mem::discriminant(&observed) != std::mem::discriminant(expected)
                 || expected.is_null()

@@ -515,6 +515,15 @@ fn validate_comparison(rule_id: &str, compare: &Comparison) -> Result<(), Compil
         ));
     }
 
+    // A non-finite tolerance would serialize as null, so it is caught before it can be written
+    // out, or evaluated in memory by the one-step path.
+    if compare.has_invalid_tolerance() {
+        return Err(bad_authoring(
+            "comparison tolerance must be a finite number of zero or more",
+            json!({"rule_id": rule_id}),
+        ));
+    }
+
     Ok(())
 }
 
@@ -826,6 +835,49 @@ rules:
             }
         }
         Ok(())
+    }
+
+    /// `(op block, compare)` for `row_count` and an aggregate.
+    fn tolerance_authoring(op: &str, comparator: &str, tolerance: &str) -> String {
+        format!(
+            "constraint_set_id: tolerance\nbindings:\n  input: {{}}\nrules:\n  - id: TOLERANCE\n    severity: error\n    binding: input\n    op: {op}\n    compare: {{ {comparator}: 2, tolerance: {tolerance} }}\n"
+        )
+    }
+
+    const TOLERANCE_OPS: [&str; 2] = [
+        "row_count",
+        "aggregate_compare\n    aggregate: { max: value }",
+    ];
+
+    /// A tolerance must be a finite number of zero or more, whatever the comparator does with
+    /// it. A blank YAML value is a null.
+    #[test]
+    fn rejects_an_invalid_comparison_tolerance() -> Result<(), String> {
+        for tolerance in ["-1", "-1e-300", ".nan", ".inf", "-.inf", "null", "~", ""] {
+            for comparator in ["eq", "ne", "gt", "gte", "lt", "lte"] {
+                for op in TOLERANCE_OPS {
+                    let source = tolerance_authoring(op, comparator, tolerance);
+                    let detail =
+                        bad_authoring_detail(&source, "an invalid tolerance should be rejected")
+                            .map_err(|error| format!("{comparator} {tolerance:?}: {error}"))?;
+                    assert_eq!(detail["rule_id"], "TOLERANCE", "{comparator} {tolerance:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_every_finite_non_negative_tolerance() {
+        for tolerance in ["0", "-0.0", "0.5", "1.0e+308"] {
+            for comparator in ["eq", "ne", "gt", "lte"] {
+                for op in TOLERANCE_OPS {
+                    let source = tolerance_authoring(op, comparator, tolerance);
+                    let compiled = compile_source(&source);
+                    assert!(compiled.is_ok(), "{comparator} {tolerance}: {compiled:?}");
+                }
+            }
+        }
     }
 
     #[test]

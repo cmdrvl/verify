@@ -239,6 +239,17 @@ where
     Value::deserialize(deserializer).map(Some)
 }
 
+/// Keep a tolerance written as `null` as a declared tolerance that is not a number. `f64` has
+/// no null, so it is held as NaN, which serializes back to `null` (as an infinity also does).
+/// It is invalid like any other non-finite tolerance. A comparison holding one is not equal to
+/// itself under `PartialEq`.
+fn deserialize_present_tolerance<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<f64>::deserialize(deserializer).map(|tolerance| Some(tolerance.unwrap_or(f64::NAN)))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Comparison {
@@ -278,8 +289,21 @@ pub struct Comparison {
         skip_serializing_if = "Option::is_none"
     )]
     pub lte: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_tolerance",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tolerance: Option<f64>,
+}
+
+impl Comparison {
+    /// True when a tolerance is declared that is not a finite number of zero or more. This
+    /// holds whether or not any declared operator would use it.
+    pub fn has_invalid_tolerance(&self) -> bool {
+        self.tolerance
+            .is_some_and(|tolerance| !(tolerance.is_finite() && tolerance >= 0.0))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -330,9 +354,47 @@ mod tests {
             let parsed: Comparison = serde_json::from_str(text).expect("comparison parses");
             assert_eq!(serde_json::to_string(&parsed).expect("serializes"), text);
         }
-        let tolerance: Comparison =
-            serde_json::from_str(r#"{"eq":1,"tolerance":null}"#).expect("parses");
-        assert_eq!(tolerance.tolerance, None);
+    }
+
+    /// `"tolerance": null` is a declared tolerance that is not a number, not an absent one: it
+    /// must reach evaluation, where it refuses, and survive serialization.
+    #[test]
+    fn explicit_null_tolerance_is_kept_and_an_absent_one_stays_absent() {
+        let text = r#"{"eq":1,"tolerance":null}"#;
+        let value: serde_json::Value = serde_json::from_str(text).expect("JSON");
+        for parsed in [
+            serde_json::from_str::<Comparison>(text).expect("comparison parses"),
+            serde_json::from_value::<Comparison>(value).expect("comparison parses"),
+        ] {
+            assert!(
+                parsed.tolerance.is_some_and(f64::is_nan),
+                "{:?}",
+                parsed.tolerance
+            );
+            assert_eq!(serde_json::to_string(&parsed).expect("serializes"), text);
+        }
+
+        let absent: Comparison = serde_json::from_str(r#"{"eq":1}"#).expect("parses");
+        assert_eq!(absent.tolerance, None);
+
+        // A tolerance no JSON number can carry serializes as null and so stays invalid.
+        for tolerance in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let built = Comparison {
+                eq: Some(json!(1)),
+                tolerance: Some(tolerance),
+                ..Default::default()
+            };
+            let written = serde_json::to_string(&built).expect("serializes");
+            assert_eq!(written, text);
+            let reread: Comparison = serde_json::from_str(&written).expect("parses");
+            assert!(reread.tolerance.is_some_and(f64::is_nan));
+        }
+
+        for valid in ["-0.0", "0.0", "0.5", "1e+308"] {
+            let text = format!(r#"{{"eq":1,"tolerance":{valid}}}"#);
+            let parsed: Comparison = serde_json::from_str(&text).expect("parses");
+            assert_eq!(serde_json::to_string(&parsed).expect("serializes"), text);
+        }
     }
 
     #[test]

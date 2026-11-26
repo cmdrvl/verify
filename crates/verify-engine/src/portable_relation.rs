@@ -310,6 +310,11 @@ fn evaluate_comparison(
     observed: &Value,
     compare: &Comparison,
 ) -> Result<bool, RelationEngineError> {
+    if compare.has_invalid_tolerance() {
+        return Err(RelationEngineError::BadExpression(
+            "tolerance must be a finite number of zero or more".to_owned(),
+        ));
+    }
     check_threshold_types(observed, compare)?;
 
     let predicates = [
@@ -1194,6 +1199,104 @@ mod tests {
                     "{check}: {outcome:?}"
                 );
             }
+        }
+    }
+
+    fn assert_tolerance_refused(observed: &Value, compare: &Comparison) {
+        let outcome = super::evaluate_comparison(observed, compare);
+        assert!(
+            matches!(&outcome, Err(RelationEngineError::BadExpression(message))
+                if message.contains("tolerance must be a finite number")),
+            "observed {observed} with {compare:?}: {outcome:?}"
+        );
+    }
+
+    /// An invalid tolerance refuses even where a valid one would be ignored: on ordering
+    /// operators and over strings and booleans.
+    #[test]
+    fn an_invalid_tolerance_refuses_for_every_operator_and_type() {
+        for observed in [json!(10), json!("10"), json!(true)] {
+            for operator in OPERATORS {
+                // The observed value as its own threshold, then a different one of its type.
+                let other = match &observed {
+                    Value::Number(_) => json!(11),
+                    Value::String(_) => json!("11"),
+                    _ => json!(false),
+                };
+                for threshold in [observed.clone(), other] {
+                    let declared = with_threshold(operator, &threshold);
+                    for tolerance in [json!(-1), json!(-1e-300), json!(-1e308), Value::Null] {
+                        let mut compare = declared.clone();
+                        compare.insert("tolerance".to_owned(), tolerance);
+                        assert_tolerance_refused(&observed, &comparison(Value::Object(compare)));
+                    }
+                    // No JSON artifact can carry these; a Rust caller can.
+                    for tolerance in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                        let mut compare = comparison(Value::Object(declared.clone()));
+                        compare.tolerance = Some(tolerance);
+                        assert_tolerance_refused(&observed, &compare);
+                    }
+                }
+            }
+        }
+        assert_tolerance_refused(
+            &json!(10),
+            &comparison(json!({ "gte": 5, "lte": 99, "tolerance": -1 })),
+        );
+        assert_tolerance_refused(&json!(10), &comparison(json!({ "tolerance": -1 })));
+    }
+
+    #[test]
+    fn valid_tolerances_behave_as_before() {
+        for (observed, compare, expected) in [
+            (json!(10), json!({ "eq": 10, "tolerance": -0.0 }), true),
+            (json!(10), json!({ "ne": 10, "tolerance": -0.0 }), false),
+            (json!(10), json!({ "eq": 11, "tolerance": 0 }), false),
+            (json!(10), json!({ "eq": 10.5, "tolerance": 0.5 }), true),
+            (json!(10), json!({ "ne": 10.5, "tolerance": 0.5 }), false),
+            (json!(10), json!({ "eq": 11, "tolerance": 1e308 }), true),
+            (json!(10), json!({ "gt": 9, "tolerance": 1e308 }), true),
+            (json!(10), json!({ "lte": 9, "tolerance": 1e308 }), false),
+            (json!("10"), json!({ "ne": "11", "tolerance": 1e308 }), true),
+            (json!(true), json!({ "eq": false, "tolerance": 1 }), false),
+        ] {
+            assert_eq!(
+                super::evaluate_comparison(&observed, &comparison(compare.clone())),
+                Ok(expected),
+                "observed {observed} with {compare}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_count_and_every_aggregate_refuse_an_invalid_tolerance() {
+        let relations = relations_with(
+            "input",
+            &[],
+            vec![row(&[("v", json!(9))]), row(&[("v", json!(10))])],
+        );
+        let mut checks = vec![json!({ "op": "row_count", "binding": "input" })];
+        for function in ["min", "max", "sum", "avg"] {
+            let mut aggregate = serde_json::Map::new();
+            aggregate.insert(function.to_owned(), json!("v"));
+            checks.push(
+                json!({ "op": "aggregate_compare", "binding": "input", "aggregate": aggregate }),
+            );
+        }
+
+        for mut check in checks {
+            check["compare"] = json!({ "ne": 2, "tolerance": -1 });
+            let rule = make_rule(
+                "TOLERANCE",
+                Severity::Error,
+                serde_json::from_value(check.clone()).expect("check parses"),
+            );
+            let outcome = evaluate_rule(&rule, &relations);
+            assert!(
+                matches!(&outcome, Err(RelationEngineError::BadExpression(message))
+                    if message.contains("tolerance must be a finite number")),
+                "{check}: {outcome:?}"
+            );
         }
     }
 

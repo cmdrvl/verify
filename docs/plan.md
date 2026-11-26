@@ -446,6 +446,21 @@ These rules apply to the `compare` object of `row_count` and
 - `tolerance` does not make a threshold of another type comparable
 - portable authoring rejects a null threshold with `E_BAD_AUTHORING`
 
+#### Comparison tolerance
+
+These rules apply to `compare.tolerance`:
+
+- a tolerance is optional; a declared one must be a finite number greater than
+  or equal to zero (`-0.0` is zero)
+- any other declared tolerance refuses with `E_BAD_EXPR`, whatever the
+  operators or the observed value type, including those a valid tolerance does
+  not affect
+- an explicit `"tolerance": null` is a declared tolerance that is not a number:
+  it refuses, and it is preserved when the artifact is serialized
+- portable authoring rejects a negative, non-finite, null, or blank tolerance
+  with `E_BAD_AUTHORING`, so compiling and then running and the one-step path
+  agree
+
 #### `aggregate_compare` `min` and `max` semantics
 
 These rules govern the value `min` and `max` select:
