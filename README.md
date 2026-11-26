@@ -225,6 +225,7 @@ subcommand (`verify docter`) is refused with exit `2` and a "did you mean
 ```text
 verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH> [--lock <LOCKFILE>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]
 verify <DATASET> --rules <AUTHORING> [--key <FIELD>] [--json] [--sample-affected <N>] [--explicit] [--no-witness]
+verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE> [--json] [--explicit] [--no-witness]
 verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]
 verify compile --schema
 verify validate <COMPILED_CONSTRAINTS> [--json]
@@ -419,6 +420,16 @@ When a failing rule has many localized rows, `--sample-affected <N>` limits the 
 ### Input locks (`--lock`)
 
 `--lock <LOCKFILE>` (repeatable) checks each bound input against a lockfile before any rule runs. It reads the canonical `lock.v0` manifest that `vacuum | hashbytes | lock` writes: each `members[].bytes_hash` is `sha256:<hex>` or `blake3:<hex>` of the raw file bytes, and verify hashes the bound file with the member's own algorithm. A member matches by exact path, otherwise by a unique basename (real locks store paths relative to the vacuum root); an ambiguous basename counts as not locked. Different bytes refuse with `E_INPUT_DRIFT`, a bound input with no member refuses with `E_INPUT_NOT_LOCKED`, and an unknown hash algorithm, a member with no `bytes_hash`, or an unknown lock version refuses with `E_IO` (exit 2). The old verify-private `lock.input.v1` format (`content_hash`, sha256 only) is still read and is deprecated. Not checked: the lock's own `lock_hash` self-hash.
+
+### Document grounding (`ground`)
+
+`verify ground` checks citations against raw source-document bytes that are pinned by a required, repeatable `--lock` (`lock.v0`) argument. The claims input is JSONL; each line requires `claim_id`, `source`, `quote`, and a half-open byte span, with optional numeric `value`, `unit`, and `scale`:
+
+```json
+{"claim_id":"loan-amount","source":"filing","quote":"95000000.00000000","byte_span":{"start":123,"end":140},"value":95,"unit":"USD","scale":"millions"}
+```
+
+The pure-Rust engine first compares quote bytes exactly, then accepts Unicode whitespace trimmed and collapsed to one ASCII space. Numeric surfaces use exact decimal arithmetic for `units`, `thousands`, `millions`, `percent`, and `bps`; a wrong scale is a deterministic `E_SCALE_MISMATCH` result. The command reuses `verify.report.v1` and the existing redaction: failing quote/value details are ordinal refs by default and raw only with `--explicit`. HTML tag/entity normalization and document-wide search when `byte_span` is omitted are deferred to a follow-up.
 
 ### Redaction (`--explicit`)
 

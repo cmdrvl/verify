@@ -16,6 +16,7 @@
       "verify doctor triage --json",
       "verify capabilities --json",
       "verify robot-docs guide",
+      "verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE> [--json] [--explicit] [--no-witness]",
       "verify compile <AUTHORING> [--out <OUTPUT>] [--check] [--json]",
       "verify validate <COMPILED_CONSTRAINTS> [--json]",
       "verify witness <query|last|count> [--outcome <OUTCOME>] [--command <COMMAND>] [--limit <N>] [--json]",
@@ -197,6 +198,20 @@
         "writes_files": false,
         "uses_network": false,
         "emits_report_schema": "verify.report.v1"
+      }
+    },
+    {
+      "name": "ground",
+      "description": "Check cited quotes and exact numeric scales against source documents pinned by lock.v0",
+      "status": "available",
+      "usage": "verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE> [--json] [--explicit] [--no-witness]",
+      "read_only": false,
+      "current_runtime_behavior": {
+        "writes_witness": "unless --no-witness is set",
+        "writes_files": false,
+        "uses_network": false,
+        "emits_report_schema": "verify.report.v1",
+        "default_redaction": "ordinal refs; --explicit includes raw quote and numeric evidence"
       }
     },
     {
@@ -431,7 +446,7 @@
     "writes_files": true,
     "network": false,
     "writes_witness": true,
-    "notes": "run and the arity-1 shortcut append a witness record unless --no-witness; compile writes only with --out; doctor, capabilities, robot-docs, validate and witness read commands never write"
+    "notes": "run, ground and the arity-1 shortcut append a witness record unless --no-witness; compile writes only with --out; doctor, capabilities, robot-docs, validate and witness read commands never write"
   },
 
   "pipeline": {

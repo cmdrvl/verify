@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assetData xmlns="http://www.sec.gov/edgar/document/absee/cmbs/assetdata">
+  <assets>
+    <assetTypeNumber>Prospectus Loan ID</assetTypeNumber>
+    <assetNumber>1</assetNumber>
+    <originatorName>CREFI</originatorName>
+    <originalLoanAmount>95000000.00000000</originalLoanAmount>
+    <property>
+      <propertyName>95 Morton Street</propertyName>
+      <netRentableSquareFeetSecuritizationNumber>217084</netRentableSquareFeetSecuritizationNumber>
+      <valuationSecuritizationAmount>210000000.00000000</valuationSecuritizationAmount>
+    </property>
+  </assets>
+</assetData>

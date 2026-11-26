@@ -134,7 +134,7 @@ impl RunCommandResult {
         }
     }
 
-    fn append_warning(&mut self, warning: String) {
+    pub(crate) fn append_warning(&mut self, warning: String) {
         match &mut self.stderr {
             Some(stderr) if !stderr.is_empty() => {
                 stderr.push('\n');
@@ -184,7 +184,7 @@ pub fn execute_shortcut(args: ShortcutArgs) -> RunCommandResult {
     result
 }
 
-fn redact_unless_explicit(
+pub(crate) fn redact_unless_explicit(
     report: &mut VerifyReport,
     common: &CommonRunArgs,
     key: Option<&RedactionKey>,
@@ -203,7 +203,7 @@ fn redact_unless_explicit(
 
 /// A set-but-unusable `VERIFY_REDACTION_KEY` is refused before any input is read. The message
 /// and detail name the variable and the rule, never the key or its length.
-fn redaction_key_refusal(error: KeyError) -> VerifyReport {
+pub(crate) fn redaction_key_refusal(error: KeyError) -> VerifyReport {
     batch_refusal(
         RefusalCode::RedactionKey,
         format!(
@@ -686,7 +686,7 @@ fn materialize_relation(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn report_to_result(
+pub(crate) fn report_to_result(
     report: VerifyReport,
     json: bool,
     sample_affected: Option<usize>,
@@ -709,7 +709,7 @@ fn report_to_result(
     }
 }
 
-fn sha256_of_bytes(bytes: &[u8]) -> String {
+pub(crate) fn sha256_of_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())

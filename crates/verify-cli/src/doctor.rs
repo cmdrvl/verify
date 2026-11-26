@@ -474,6 +474,7 @@ fn top_level_robot_docs() -> String {
         "- `verify doctor triage --json` (alias `verify --robot-triage`) returns one read-only `cmdrvl.doctor.v1` packet.",
         "- `verify capabilities --json` returns the `operator.v1` command contract (same document as `verify --describe`).",
         "- `verify run COMPILED.verify.json --bind input=data.csv --json --no-witness` evaluates a compiled constraint set without appending a witness record.",
+        "- `verify ground CLAIMS.jsonl --bind filing=document.xml --lock filing.lock.json --json --no-witness` checks locked document quotes and numeric scales using `verify.report.v1`.",
         "- `verify DATASET.csv --rules rules.yaml --json --no-witness` compiles and runs the arity-1 shortcut.",
         "- `verify compile AUTHORING.yaml --check --json` validates authoring without writing an output file.",
         "",

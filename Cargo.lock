@@ -2639,7 +2639,10 @@ dependencies = [
 name = "verify-engine"
 version = "0.6.1"
 dependencies = [
+ "blake3",
+ "serde",
  "serde_json",
+ "sha2",
  "verify-core",
 ]
 

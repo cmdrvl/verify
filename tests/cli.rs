@@ -77,6 +77,7 @@ fn help_output_lists_primary_run_surface() {
     assert!(stdout.contains("capabilities"));
     assert!(stdout.contains("robot-docs"));
     assert!(stdout.contains("run"));
+    assert!(stdout.contains("ground"));
     assert!(output.stderr.is_empty());
 }
 
@@ -92,6 +93,9 @@ fn bare_verify_explains_discovery_and_run_commands() {
     assert!(stderr.contains("verify --robot-triage"));
     assert!(stderr.contains("verify capabilities --json"));
     assert!(stderr.contains("verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH>"));
+    assert!(
+        stderr.contains("verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE>")
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ use std::{ffi::OsString, process::ExitCode};
 
 mod compile;
 mod doctor;
+mod ground;
 mod paths;
 mod redact;
 mod render;
@@ -40,6 +41,7 @@ enum Command {
     RobotDocs(doctor::TopLevelRobotDocsArgs),
     Run(run::RunArgs),
     Compile(compile::CompileArgs),
+    Ground(ground::GroundArgs),
     Validate(validate::ValidateArgs),
     Witness(witness::WitnessArgs),
     Doctor(doctor::DoctorArgs),
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
 const KNOWN_COMMANDS: &[&str] = &[
     "run",
     "compile",
+    "ground",
     "validate",
     "witness",
     "doctor",
@@ -153,6 +156,7 @@ where
                     candidate,
                     "run"
                         | "compile"
+                        | "ground"
                         | "validate"
                         | "witness"
                         | "doctor"
@@ -245,6 +249,7 @@ fn dispatch(cli: Cli) -> DispatchOutcome {
         Some(Command::RobotDocs(args)) => from_doctor(doctor::execute_top_level_robot_docs(args)),
         Some(Command::Run(args)) => from_run(run::execute(args)),
         Some(Command::Compile(args)) => from_command(compile::execute(args)),
+        Some(Command::Ground(args)) => from_run(ground::execute(args)),
         Some(Command::Validate(args)) => from_command(validate::execute(args)),
         Some(Command::Witness(args)) => from_witness(witness::execute(args)),
         Some(Command::Doctor(args)) => from_doctor(doctor::execute(args)),
@@ -258,6 +263,7 @@ fn root_guidance() -> String {
         "verify: no command or dataset was provided.",
         "For agent discovery, run `verify --robot-triage`, `verify capabilities --json`, or `verify robot-docs guide`.",
         "To evaluate constraints, run `verify run <COMPILED_CONSTRAINTS> --bind <NAME=PATH>` or `verify <DATASET> --rules <AUTHORING>`.",
+        "To ground cited claims against locked documents, run `verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE>`.",
         "For help with verify, run `verify --help`.",
     ]
     .join(" ")
