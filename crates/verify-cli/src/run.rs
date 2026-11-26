@@ -1,11 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use verify_core::{
-    constraint::{Check, ConstraintSet, Portability, Rule},
+    constraint::{
+        Check, ConstraintSet, MembershipOperand, Portability, PredicateExpression,
+        PredicateOperand, Rule,
+    },
     order::sort_report,
     refusal::RefusalCode,
     report::{BindingReport, ExecutionMode, InputVerification, Outcome, VerifyReport},
@@ -15,8 +18,8 @@ use verify_core::{
 };
 use verify_duckdb::{
     BatchBindingInput, BatchBindingLimits, BindingPredicateError, BindingRegistry,
-    duckdb_value_to_protocol, evaluate_binding_predicate, execute_query_rules,
-    prepare_batch_context, quote_identifier, verify_locks,
+    duckdb_type_is_temporal, duckdb_value_to_protocol, evaluate_binding_predicate,
+    execute_query_rules, prepare_batch_context, quote_identifier, verify_locks,
 };
 use verify_engine::{Relation, SummaryEngine, portable_relation, portable_row};
 
@@ -564,6 +567,7 @@ fn materialize_all_bindings(
     constraint_hash: &str,
 ) -> Result<BTreeMap<String, Relation>, VerifyReport> {
     let requested_columns = portable_relation_columns(constraints);
+    let temporal_nullity_columns = temporal_nullity_columns(constraints);
     let mut relations = BTreeMap::new();
     for (name, loaded) in registry.iter() {
         let key_fields = constraints
@@ -588,29 +592,46 @@ fn materialize_all_bindings(
             .filter(|column| loaded.column(column).is_some())
             .map(String::as_str)
             .collect();
+        let temporal_as_text = projection
+            .iter()
+            .filter(|column| {
+                temporal_nullity_columns
+                    .get(name)
+                    .is_some_and(|columns| columns.iter().any(|name| name == *column))
+                    && loaded
+                        .column(column)
+                        .is_some_and(|loaded| duckdb_type_is_temporal(&loaded.data_type))
+            })
+            .map(|column| (*column).to_owned())
+            .collect::<BTreeSet<_>>();
 
-        let relation =
-            materialize_relation(connection, loaded.relation_name(), key_fields, &projection)
-                .map_err(|error| {
-                    let detail = match &error {
-                        // The column name comes from the constraints, and the text
-                        // names only a DuckDB type, so default redaction keeps it.
-                        MaterializeError::Unrepresentable { column, .. } => {
-                            json!({ "binding": name, "column": column, "error": error.to_string() })
-                        }
-                        MaterializeError::Duckdb(_) => {
-                            json!({ "binding": name, "error": error.to_string() })
-                        }
-                    };
-                    VerifyReport::refusal(
-                        ExecutionMode::Batch,
-                        constraints.constraint_set_id.clone(),
-                        constraint_hash,
-                        RefusalCode::SqlError,
-                        format!("failed to materialize binding {name}: {error}"),
-                        detail,
-                    )
-                })?;
+        let relation = materialize_relation(
+            connection,
+            loaded.relation_name(),
+            key_fields,
+            &projection,
+            &temporal_as_text,
+        )
+        .map_err(|error| {
+            let detail = match &error {
+                // The column name comes from the constraints, and the text
+                // names only a DuckDB type, so default redaction keeps it.
+                MaterializeError::Unrepresentable { column, .. } => {
+                    json!({ "binding": name, "column": column, "error": error.to_string() })
+                }
+                MaterializeError::Duckdb(_) => {
+                    json!({ "binding": name, "error": error.to_string() })
+                }
+            };
+            VerifyReport::refusal(
+                ExecutionMode::Batch,
+                constraints.constraint_set_id.clone(),
+                constraint_hash,
+                RefusalCode::SqlError,
+                format!("failed to materialize binding {name}: {error}"),
+                detail,
+            )
+        })?;
         relations.insert(name.to_owned(), relation);
     }
     Ok(relations)
@@ -637,6 +658,7 @@ fn materialize_relation(
     relation_name: &str,
     key_fields: Vec<String>,
     projection: &[&str],
+    temporal_as_text: &BTreeSet<String>,
 ) -> Result<Relation, MaterializeError> {
     let duck = |error: duckdb::Error| MaterializeError::Duckdb(error.to_string());
     // A rule may read a relation for its row count alone, with no column of
@@ -656,7 +678,14 @@ fn materialize_relation(
     let column_names: Vec<String> = projection.iter().map(|name| (*name).to_owned()).collect();
     let selected = projection
         .iter()
-        .map(|name| quote_identifier(name))
+        .map(|name| {
+            let quoted = quote_identifier(name);
+            if temporal_as_text.contains(*name) {
+                format!("CAST({quoted} AS VARCHAR) AS {quoted}")
+            } else {
+                quoted
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!("SELECT {selected} FROM {relation_name}");
@@ -680,6 +709,182 @@ fn materialize_relation(
     }
 
     Ok(Relation::new(key_fields, rows))
+}
+
+#[derive(Default)]
+struct ColumnUsage {
+    nullity: bool,
+    value: bool,
+}
+
+/// Find temporal columns whose only portable consumers ask about presence.
+///
+/// The protocol deliberately has no temporal scalar representation. These
+/// columns may be rendered as DuckDB text for failure localization, but only
+/// after this analysis proves that no rule, comparison, aggregate, foreign-key
+/// check, or key field needs their value.
+fn temporal_nullity_columns(constraints: &ConstraintSet) -> BTreeMap<String, BTreeSet<String>> {
+    let mut usage = BTreeMap::<String, BTreeMap<String, ColumnUsage>>::new();
+
+    for rule in constraints
+        .rules
+        .iter()
+        .filter(|rule| routes_to_portable_engine(rule))
+    {
+        match &rule.check {
+            Check::Unique { binding, columns } => {
+                mark_values(&mut usage, binding, columns);
+            }
+            Check::NotNull { binding, columns } => {
+                mark_nullity(&mut usage, binding, columns);
+            }
+            Check::Predicate { binding, expr } => {
+                classify_predicate_columns(binding, expr, &mut usage);
+            }
+            Check::RowCount { .. } | Check::QueryZeroRows { .. } => {}
+            Check::AggregateCompare {
+                binding, aggregate, ..
+            } => {
+                mark_values(
+                    &mut usage,
+                    binding,
+                    [
+                        aggregate.sum.as_ref(),
+                        aggregate.avg.as_ref(),
+                        aggregate.min.as_ref(),
+                        aggregate.max.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten(),
+                );
+            }
+            Check::ForeignKey {
+                binding,
+                columns,
+                ref_binding,
+                ref_columns,
+            } => {
+                mark_values(&mut usage, binding, columns);
+                mark_values(&mut usage, ref_binding, ref_columns);
+            }
+        }
+    }
+
+    // Key fields are materialized for localization and must remain protocol
+    // scalars even when a nullity rule also names the same column.
+    for binding in &constraints.bindings {
+        mark_values(&mut usage, &binding.name, &binding.key_fields);
+    }
+
+    usage
+        .into_iter()
+        .map(|(binding, columns)| {
+            let nullity_only = columns
+                .into_iter()
+                .filter_map(|(column, usage)| (usage.nullity && !usage.value).then_some(column))
+                .collect();
+            (binding, nullity_only)
+        })
+        .collect()
+}
+
+fn mark_nullity<'a>(
+    usage: &mut BTreeMap<String, BTreeMap<String, ColumnUsage>>,
+    binding: &str,
+    columns: impl IntoIterator<Item = &'a String>,
+) {
+    for column in columns {
+        usage
+            .entry(binding.to_owned())
+            .or_default()
+            .entry(column.clone())
+            .or_default()
+            .nullity = true;
+    }
+}
+
+fn mark_values<'a>(
+    usage: &mut BTreeMap<String, BTreeMap<String, ColumnUsage>>,
+    binding: &str,
+    columns: impl IntoIterator<Item = &'a String>,
+) {
+    for column in columns {
+        usage
+            .entry(binding.to_owned())
+            .or_default()
+            .entry(column.clone())
+            .or_default()
+            .value = true;
+    }
+}
+
+fn mark_reference(
+    usage: &mut BTreeMap<String, BTreeMap<String, ColumnUsage>>,
+    anchor_binding: &str,
+    reference: &verify_core::constraint::ColumnReference,
+    nullity: bool,
+) {
+    let binding = reference.binding.as_deref().unwrap_or(anchor_binding);
+    let entry = usage
+        .entry(binding.to_owned())
+        .or_default()
+        .entry(reference.column.clone())
+        .or_default();
+    if nullity {
+        entry.nullity = true;
+    } else {
+        entry.value = true;
+    }
+}
+
+fn mark_operand_value(
+    usage: &mut BTreeMap<String, BTreeMap<String, ColumnUsage>>,
+    anchor_binding: &str,
+    operand: &PredicateOperand,
+) {
+    if let PredicateOperand::Column(reference) = operand {
+        mark_reference(usage, anchor_binding, reference, false);
+    }
+}
+
+fn classify_predicate_columns(
+    anchor_binding: &str,
+    expression: &PredicateExpression,
+    usage: &mut BTreeMap<String, BTreeMap<String, ColumnUsage>>,
+) {
+    match expression {
+        PredicateExpression::Column(reference)
+        | PredicateExpression::IsNull { is_null: reference }
+        | PredicateExpression::IsBlank {
+            is_blank: reference,
+        } => mark_reference(usage, anchor_binding, reference, true),
+        PredicateExpression::Eq { eq: operands }
+        | PredicateExpression::Ne { ne: operands }
+        | PredicateExpression::Gt { gt: operands }
+        | PredicateExpression::Gte { gte: operands }
+        | PredicateExpression::Lt { lt: operands }
+        | PredicateExpression::Lte { lte: operands } => {
+            for operand in operands {
+                mark_operand_value(usage, anchor_binding, operand);
+            }
+        }
+        PredicateExpression::And { and: expressions }
+        | PredicateExpression::Or { or: expressions } => {
+            for expression in expressions {
+                classify_predicate_columns(anchor_binding, expression, usage);
+            }
+        }
+        PredicateExpression::Not { not: expression } => {
+            classify_predicate_columns(anchor_binding, expression, usage);
+        }
+        PredicateExpression::In { r#in: operands } => {
+            for operand in operands {
+                if let MembershipOperand::Operand(operand) = operand {
+                    mark_operand_value(usage, anchor_binding, operand);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

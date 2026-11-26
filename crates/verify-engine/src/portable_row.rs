@@ -473,7 +473,8 @@ fn extract_key(
 }
 
 /// For simple predicates, extract the primary column reference and its value
-/// for failure localization. Complex boolean compositions return (None, None).
+/// for failure localization. A negated simple predicate keeps that same
+/// localization; more complex boolean compositions return (None, None).
 fn extract_predicate_localization(
     expr: &PredicateExpression,
     row: &BTreeMap<String, Value>,
@@ -501,9 +502,8 @@ fn extract_predicate_localization(
             let value = row.get(&col_ref.column).cloned().unwrap_or(Value::Null);
             (Some(col_ref.column.clone()), Some(value))
         }
-        PredicateExpression::Not { .. }
-        | PredicateExpression::And { .. }
-        | PredicateExpression::Or { .. } => (None, None),
+        PredicateExpression::Not { not } => extract_predicate_localization(not, row),
+        PredicateExpression::And { .. } | PredicateExpression::Or { .. } => (None, None),
     }
 }
 
@@ -1139,6 +1139,71 @@ mod tests {
         let result = evaluate_rule(&rule_null, &rels).unwrap();
         // is_null predicate: only null passes, "" and "val" fail
         assert_eq!(result.violation_count, 2);
+    }
+
+    #[test]
+    fn nullity_rules_use_presence_for_temporal_localization_text() {
+        let rows = vec![
+            row(&[
+                ("date", json!("2024-01-31")),
+                ("timestamp", json!("2026-01-31 10:00:00")),
+                ("time", json!("10:00:00")),
+                ("interval", json!("1 day 02:00:00")),
+            ]),
+            row(&[
+                ("date", Value::Null),
+                ("timestamp", Value::Null),
+                ("time", Value::Null),
+                ("interval", Value::Null),
+            ]),
+        ];
+        let relations = relations_with("input", &[], rows);
+
+        let not_null = make_rule(
+            "TEMPORAL_NOT_NULL",
+            Severity::Error,
+            Check::NotNull {
+                binding: "input".to_owned(),
+                columns: vec!["date".to_owned()],
+            },
+        );
+        let not_is_null = make_rule(
+            "TEMPORAL_NOT_IS_NULL",
+            Severity::Error,
+            Check::Predicate {
+                binding: "input".to_owned(),
+                expr: PredicateExpression::Not {
+                    not: Box::new(PredicateExpression::IsNull {
+                        is_null: ColumnReference {
+                            binding: None,
+                            column: "timestamp".to_owned(),
+                        },
+                    }),
+                },
+            },
+        );
+        let not_is_blank = make_rule(
+            "TEMPORAL_NOT_IS_BLANK",
+            Severity::Error,
+            Check::Predicate {
+                binding: "input".to_owned(),
+                expr: PredicateExpression::Not {
+                    not: Box::new(PredicateExpression::IsBlank {
+                        is_blank: ColumnReference {
+                            binding: None,
+                            column: "interval".to_owned(),
+                        },
+                    }),
+                },
+            },
+        );
+
+        for rule in [not_null, not_is_null, not_is_blank] {
+            let result = evaluate_rule(&rule, &relations).expect("nullity evaluates");
+            assert!(matches!(result.status, ResultStatus::Fail));
+            assert_eq!(result.violation_count, 1);
+            assert_eq!(result.affected[0].value, Some(Value::Null));
+        }
     }
 
     #[test]

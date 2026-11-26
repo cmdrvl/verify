@@ -21,7 +21,8 @@ pub use bindings::{
 pub use lock_check::{LockError, verify_locks};
 pub use query_rules::{QueryRuleError, evaluate_query_rule, execute_query_rules};
 pub use scalar::{
-    DuckValueError, DuckValueErrorKind, duckdb_type_category, duckdb_value_to_protocol,
+    DuckValueError, DuckValueErrorKind, duckdb_type_category, duckdb_type_is_temporal,
+    duckdb_value_to_protocol,
 };
 
 pub struct BatchContext {

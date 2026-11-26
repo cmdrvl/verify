@@ -121,6 +121,19 @@ pub fn duckdb_type_category(data_type: &str) -> Result<ScalarCategory, DuckValue
     }
 }
 
+/// Whether a DuckDB type is temporal and therefore has no protocol scalar form.
+///
+/// Nullity-only rules may still inspect the presence of these values. The batch
+/// materializer uses this classification to render those values as text solely
+/// for report localization, while every value-using rule continues to fail
+/// closed through `duckdb_value_to_protocol`.
+pub fn duckdb_type_is_temporal(data_type: &str) -> bool {
+    matches!(
+        duckdb_scalar_category(data_type),
+        Ok(DuckScalarCategory::Temporal(_))
+    )
+}
+
 /// Classify DuckDB values for batch-only predicates. This keeps protocol
 /// scalar semantics distinct from temporal values that DuckDB may compare
 /// natively without widening `verify.report.v1` values.
@@ -290,7 +303,8 @@ mod tests {
 
     use super::{
         DuckScalarCategory, DuckTemporalKind, DuckValueErrorKind, duckdb_scalar_category,
-        duckdb_type_category, duckdb_value_sort_key, duckdb_value_to_protocol,
+        duckdb_type_category, duckdb_type_is_temporal, duckdb_value_sort_key,
+        duckdb_value_to_protocol,
     };
 
     #[test]
@@ -384,6 +398,14 @@ mod tests {
                     .kind,
                 DuckValueErrorKind::Unrepresentable
             );
+            assert!(duckdb_type_is_temporal(data_type));
+        }
+    }
+
+    #[test]
+    fn protocol_types_are_not_treated_as_temporal() {
+        for data_type in ["VARCHAR", "INTEGER", "BOOLEAN", "DECIMAL(18,2)"] {
+            assert!(!duckdb_type_is_temporal(data_type));
         }
     }
 
