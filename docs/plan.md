@@ -634,6 +634,21 @@ produce the same refusal semantics. In particular, a numeric cell compared with
 the string literal `"0"` refuses rather than relying on implicit coercion or
 evaluating as unequal.
 
+#### `unique` value identity
+
+These rules govern `unique` only; they do not describe `foreign_key` matching.
+Two tuples are the same when every position holds the same value:
+
+- two integers, or two fraction-form numbers, are one value when they are
+  exactly equal as the executor receives them (so `-0.0` and `0.0` are one)
+- an integer and a fraction-form number are one value only when they are exactly
+  equal and their magnitude is below 2^53; from 2^53 up the fraction-form number
+  may be a rounded neighbor of the integer, so the two stay distinct
+- strings are one value only when identical, and booleans when equal
+- null is the same as null, so tuples with nulls in the same positions can be
+  duplicates
+- values of different scalar types are never one value
+
 #### Signed zero
 
 `-0.0` and `0.0` are the same number: they are equal, and neither orders before

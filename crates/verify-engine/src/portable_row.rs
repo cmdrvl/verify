@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use serde_json::{Value, json};
+use serde_json::{Number, Value, json};
 use verify_core::{
     constraint::{
         Check, MembershipOperand, Portability, PredicateExpression, PredicateOperand, Rule,
@@ -148,7 +148,7 @@ fn evaluate_unique(
     for (idx, row) in relation.rows.iter().enumerate() {
         let tuple: Vec<String> = columns
             .iter()
-            .map(|col| value_to_sort_key(row.get(col).unwrap_or(&Value::Null)))
+            .map(|col| unique_identity(row.get(col).unwrap_or(&Value::Null)))
             .collect();
 
         if let Some(&first_idx) = seen.get(&tuple) {
@@ -526,14 +526,34 @@ fn extract_binary_localization(
     }
 }
 
-/// Produce a stable string key for a JSON value, used for deduplication tracking.
-fn value_to_sort_key(value: &Value) -> String {
+/// Magnitude below which every integer has its own `f64`. From here up, a fraction-form number
+/// may be a rounded neighbour of an integer, so the two are not taken for one value.
+const EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// The identity `unique` gives one value: equal strings, equal booleans, null, and equal
+/// numbers as docs/plan.md defines them. The type tag keeps types apart.
+fn unique_identity(value: &Value) -> String {
     match value {
         Value::Null => "\0NULL".to_owned(),
         Value::String(s) => format!("S:{s}"),
-        Value::Number(n) => format!("N:{n}"),
+        Value::Number(n) => unique_number_identity(n),
         Value::Bool(b) => format!("B:{b}"),
         other => format!("O:{other}"),
+    }
+}
+
+/// Integers and fraction-form numbers are each told apart exactly as received. A fraction-form
+/// number that is a whole number below the limit, `-0.0` included, takes its integer's identity.
+/// Every other one keeps its own spelling, which always has a point or an exponent.
+fn unique_number_identity(number: &Number) -> String {
+    match number.as_f64() {
+        Some(float)
+            if number.is_f64() && float.fract() == 0.0 && float.abs() < EXACT_INTEGER_LIMIT =>
+        {
+            // Exact: a whole number of this magnitude fits in i64.
+            format!("N:{}", float as i64)
+        }
+        _ => format!("N:{number}"),
     }
 }
 
@@ -610,6 +630,117 @@ mod tests {
     }
 
     // --- unique tests ---
+
+    /// Whether `unique` takes two tuples for one: it fails both rows, or passes both.
+    fn one_tuple_for_unique(left: &[Value], right: &[Value]) -> bool {
+        let columns: Vec<String> = (0..left.len()).map(|index| format!("c{index}")).collect();
+        let tuple_row = |tuple: &[Value]| -> BTreeMap<String, Value> {
+            columns.iter().cloned().zip(tuple.iter().cloned()).collect()
+        };
+        let rule = make_rule(
+            "UNIQUE",
+            Severity::Error,
+            Check::Unique {
+                binding: "input".to_owned(),
+                columns: columns.clone(),
+            },
+        );
+        let relations = relations_with("input", &[], vec![tuple_row(left), tuple_row(right)]);
+        let result = evaluate_rule(&rule, &relations).expect("unique evaluates");
+        let violations = result.violation_count;
+        assert!(
+            violations == 0 || violations == 2,
+            "{left:?} and {right:?}: {violations} violations"
+        );
+        violations == 2
+    }
+
+    /// Every spelling in a group is one value, and no two groups share one. An integer and a
+    /// fraction-form number are one value only below 2^53, where every integer has its own f64.
+    fn unique_value_classes() -> Vec<Vec<Value>> {
+        let two_pow_53 = 9_007_199_254_740_992_i64;
+        vec![
+            vec![json!(0), json!(0.0), json!(-0.0)],
+            vec![json!(1), json!(1.0)],
+            vec![json!(-1), json!(-1.0)],
+            vec![json!(1.5)],
+            vec![json!(-1.5)],
+            vec![json!(5e-324)],
+            vec![json!(-5e-324)],
+            // The largest magnitudes at which the two forms still meet.
+            vec![json!(two_pow_53 - 1), json!(9_007_199_254_740_991.0)],
+            vec![json!(1 - two_pow_53), json!(-9_007_199_254_740_991.0)],
+            // From 2^53 on, each form is its own value.
+            vec![json!(two_pow_53)],
+            vec![json!(9_007_199_254_740_992.0)],
+            vec![json!(two_pow_53 + 1)],
+            vec![json!(9_007_199_254_740_994.0)],
+            vec![json!(-two_pow_53)],
+            vec![json!(-9_007_199_254_740_992.0)],
+            vec![json!(i64::MIN)],
+            vec![json!(-9_223_372_036_854_775_808.0)],
+            vec![json!(u64::MAX)],
+            vec![json!(18_446_744_073_709_551_616.0)],
+            vec![json!(1e300)],
+            // Other types never equal a number, and nulls equal each other.
+            vec![json!("0")],
+            vec![json!("1")],
+            vec![json!("1.0")],
+            vec![json!("")],
+            vec![json!(false)],
+            vec![json!(true)],
+            vec![json!("true")],
+            vec![Value::Null],
+            vec![json!("null")],
+        ]
+    }
+
+    #[test]
+    fn unique_takes_equal_numbers_for_one_value_and_nothing_else() {
+        let classes = unique_value_classes();
+        for (left_class, left_values) in classes.iter().enumerate() {
+            for (right_class, right_values) in classes.iter().enumerate() {
+                for left in left_values {
+                    for right in right_values {
+                        assert_eq!(
+                            one_tuple_for_unique(
+                                std::slice::from_ref(left),
+                                std::slice::from_ref(right)
+                            ),
+                            left_class == right_class,
+                            "{left} and {right}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Composite tuples are the same only when every position is the same value.
+    #[test]
+    fn unique_compares_composite_tuples_position_by_position() {
+        for (left, right, same) in [
+            ([json!(1), json!(-0.0)], [json!(1.0), json!(0)], true),
+            ([json!(1), Value::Null], [json!(1.0), Value::Null], true),
+            ([Value::Null, Value::Null], [Value::Null, Value::Null], true),
+            ([json!("a"), json!(2.0)], [json!("a"), json!(2)], true),
+            ([json!(1), json!(2)], [json!(2), json!(1)], false),
+            ([json!(1), json!(2)], [json!(1.0), json!(2.5)], false),
+            ([json!(1), Value::Null], [json!(1), json!(0)], false),
+            ([json!(1), json!("2")], [json!(1), json!(2)], false),
+            (
+                [json!(1), json!(9_007_199_254_740_992_i64)],
+                [json!(1), json!(9_007_199_254_740_992.0)],
+                false,
+            ),
+        ] {
+            assert_eq!(
+                one_tuple_for_unique(&left, &right),
+                same,
+                "{left:?} and {right:?}"
+            );
+        }
+    }
 
     #[test]
     fn unique_passes_when_no_duplicates() {

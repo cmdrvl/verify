@@ -1239,12 +1239,7 @@ fn run_oracle_arm(
 
 #[test]
 fn arm_s_unique_matches_duckdb() {
-    run_oracle_arm(
-        0x51,
-        400,
-        unique_case,
-        &[BEAD_F64_ROUNDING, BEAD_NUMBER_TEXT_IDENTITY],
-    );
+    run_oracle_arm(0x51, 400, unique_case, &[BEAD_F64_ROUNDING]);
 }
 
 #[test]
@@ -1803,6 +1798,23 @@ fn documented_extremum(
     selected
 }
 
+/// The documented identity `unique` gives one value, written independently of the engine: an
+/// integer, and a fraction-form number that is integral and below 2^53 in magnitude, are named
+/// by the integer. Everything else keeps its own spelling (`foreign_key` still does, bd-v3r).
+fn documented_unique_identity(value: &Value) -> String {
+    match value.as_f64() {
+        Some(float)
+            if value.as_i64().is_none()
+                && value.as_u64().is_none()
+                && float.trunc() == float
+                && float.abs() <= 9_007_199_254_740_991.0 =>
+        {
+            format!("N:{}", float as i64)
+        }
+        _ => text_identity(value),
+    }
+}
+
 /// A model of the engine's present behaviour, used only to confirm that a mismatch is exactly
 /// the filed defect and not something else in the same case.
 fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
@@ -1818,10 +1830,11 @@ fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
             let columns = strings(&case.check["columns"]);
             let mut groups = BTreeMap::<Vec<String>, Vec<String>>::new();
             for row in &input.rows {
-                groups
-                    .entry(tuple(input, row, &columns))
-                    .or_default()
-                    .push(row_key(row));
+                let identity: Vec<String> = columns
+                    .iter()
+                    .map(|column| documented_unique_identity(&row[input.index(column)].json))
+                    .collect();
+                groups.entry(identity).or_default().push(row_key(row));
             }
             Some(verdict_of(
                 groups
@@ -1971,7 +1984,7 @@ fn oracle_defect_triggers(case: &OracleCase) -> Vec<&'static str> {
     if wide_literal || cells.iter().any(|(kind, cell)| beyond_f64(*kind, cell)) {
         triggers.push(BEAD_F64_ROUNDING);
     }
-    if matches!(case.label, "unique" | "foreign_key")
+    if case.label == "foreign_key"
         && cells.iter().any(|(_, a)| {
             cells.iter().any(|(_, b)| {
                 a.json.is_number()
@@ -2522,23 +2535,84 @@ fn repro_negative_zero_is_not_below_zero() {
 }
 
 #[test]
-#[ignore = "bd-v3r: unique and foreign_key match numbers by their text"]
-fn repro_equal_numbers_are_one_value_for_unique_and_foreign_key() {
+fn unique_takes_equal_numbers_for_one_value_in_both_paths() {
+    let check = json!({ "op": "unique", "binding": "input", "columns": ["v"] });
+    let rule = artifact(&["input"], "portable", check.clone());
+    let failed = |verdict: Verdict| matches!(verdict, Verdict::Decided { pass: false, .. });
+
+    // A typed column the two zeros can both live in.
     let zeros = single_column(Kind::Double, &[Some("0.0"), Some("-0.0")]);
-    let unique = repro_outcome(
-        &[("input", &zeros)],
-        json!({ "op": "unique", "binding": "input", "columns": ["v"] }),
-    );
-    let child = single_column(Kind::Double, &[Some("1.0")]);
-    let parent = single_column(Kind::Int, &[Some("1")]);
-    let foreign_key = repro_outcome(
-        &[("input", &child), ("parent", &parent)],
-        json!({
-            "op": "foreign_key", "binding": "input", "columns": ["v"],
-            "ref_binding": "parent", "ref_columns": ["v"],
-        }),
-    );
-    assert_eq!((unique.as_str(), foreign_key.as_str()), ("FAIL", "PASS"));
+    assert!(failed(portable_verdict(&rule, &[("input", &zeros)])));
+    assert_eq!(repro_outcome(&[("input", &zeros)], check.clone()), "FAIL");
+
+    // A composite tuple whose positions are equal numbers.
+    let composite = Table {
+        columns: vec![("id", Kind::Text), ("v", Kind::Double), ("w", Kind::Int)],
+        rows: [("r0", "0.0"), ("r1", "-0.0")]
+            .into_iter()
+            .map(|(id, zero)| {
+                vec![
+                    cell(Kind::Text, id),
+                    cell(Kind::Double, zero),
+                    cell(Kind::Int, "7"),
+                ]
+            })
+            .collect(),
+    };
+    let pair = json!({ "op": "unique", "binding": "input", "columns": ["v", "w"] });
+    assert!(failed(portable_verdict(
+        &artifact(&["input"], "portable", pair.clone()),
+        &[("input", &composite)]
+    )));
+    assert_eq!(repro_outcome(&[("input", &composite)], pair), "FAIL");
+
+    // Only an embedded caller can put both numeric forms in one column.
+    for (first, second, duplicate) in [
+        (json!(1), json!(1.0), true),
+        (json!(0), json!(-0.0), true),
+        (
+            json!(9_007_199_254_740_991_i64),
+            json!(9_007_199_254_740_991.0),
+            true,
+        ),
+        (
+            json!(9_007_199_254_740_992_i64),
+            json!(9_007_199_254_740_992.0),
+            false,
+        ),
+        (json!(1), json!("1"), false),
+    ] {
+        let mut mixed = single_column(Kind::Int, &[Some("1"), Some("2")]);
+        mixed.rows[0][1].json = first.clone();
+        mixed.rows[1][1].json = second.clone();
+        assert_eq!(
+            failed(portable_verdict(&rule, &[("input", &mixed)])),
+            duplicate,
+            "{first} and {second}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "bd-v3r: foreign_key matches numbers by their text"]
+fn repro_foreign_key_resolves_equal_numbers_of_either_form() {
+    let outcome = |child: (Kind, &str), parent: (Kind, &str)| {
+        let child = single_column(child.0, &[Some(child.1)]);
+        let parent = single_column(parent.0, &[Some(parent.1)]);
+        repro_outcome(
+            &[("input", &child), ("parent", &parent)],
+            json!({
+                "op": "foreign_key", "binding": "input", "columns": ["v"],
+                "ref_binding": "parent", "ref_columns": ["v"],
+            }),
+        )
+    };
+    let observed = [
+        outcome((Kind::Double, "1.0"), (Kind::Int, "1")),
+        outcome((Kind::Int, "2"), (Kind::Double, "2.0")),
+        outcome((Kind::Double, "-0.0"), (Kind::Double, "0.0")),
+    ];
+    assert_eq!(observed, ["PASS", "PASS", "PASS"]);
 }
 
 /// The same predicate through the binding-qualified lane of `verify run`.
