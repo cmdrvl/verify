@@ -188,6 +188,19 @@ fn grounding_refusal(claims_hash: &str, error: GroundingError) -> VerifyReport {
             "grounding claim has an invalid byte span".to_owned(),
             json!({ "claim_id": claim_id, "detail": detail }),
         ),
+        GroundingError::AmbiguousQuote {
+            claim_id,
+            match_count,
+        } => refusal(
+            claims_hash,
+            RefusalCode::BadAuthoring,
+            "grounding quote is ambiguous; supply byte_span".to_owned(),
+            json!({
+                "claim_id": claim_id,
+                "code": "E_QUOTE_AMBIGUOUS",
+                "match_count": match_count,
+            }),
+        ),
     }
 }
 

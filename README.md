@@ -423,13 +423,13 @@ When a failing rule has many localized rows, `--sample-affected <N>` limits the 
 
 ### Document grounding (`ground`)
 
-`verify ground` checks citations against raw source-document bytes that are pinned by a required, repeatable `--lock` (`lock.v0`) argument. The claims input is JSONL; each line requires `claim_id`, `source`, `quote`, and a half-open byte span, with optional numeric `value`, `unit`, and `scale`:
+`verify ground` checks citations against raw source-document bytes that are pinned by a required, repeatable `--lock` (`lock.v0`) argument. The claims input is JSONL; each line requires `claim_id`, `source`, and `quote`, with an optional half-open raw byte span and optional numeric `value`, `unit`, and `scale`:
 
 ```json
 {"claim_id":"loan-amount","source":"filing","quote":"95000000.00000000","byte_span":{"start":123,"end":140},"value":95,"unit":"USD","scale":"millions"}
 ```
 
-The pure-Rust engine first compares quote bytes exactly, then accepts Unicode whitespace trimmed and collapsed to one ASCII space. Numeric surfaces use exact decimal arithmetic for `units`, `thousands`, `millions`, `percent`, and `bps`; a wrong scale is a deterministic `E_SCALE_MISMATCH` result. The command reuses `verify.report.v1` and the existing redaction: failing quote/value details are ordinal refs by default and raw only with `--explicit`. HTML tag/entity normalization and document-wide search when `byte_span` is omitted are deferred to a follow-up.
+The pure-Rust engine drops HTML tags and comments, drops `script` and `style` contents, decodes `amp`, `lt`, `gt`, `quot`, `apos`, `nbsp`, and valid numeric character references, then trims and collapses Unicode whitespace to one ASCII space. A supplied raw span is mapped through that normalization; without `byte_span`, exactly one normalized visible match is required. Zero matches is `E_QUOTE_NOT_FOUND`; multiple matches refuse with `E_BAD_AUTHORING` and detail code `E_QUOTE_AMBIGUOUS` plus `match_count`, never guessing a location. Text inside tags, comments, scripts, and styles is not searchable. Numeric surfaces use exact decimal arithmetic for `units`, `thousands`, `millions`, `percent`, and `bps`; a wrong scale is a deterministic `E_SCALE_MISMATCH` result. The command reuses `verify.report.v1` and the existing redaction: failing quote/value details are ordinal refs by default and raw only with `--explicit`.
 
 ### Redaction (`--explicit`)
 

@@ -202,7 +202,7 @@
     },
     {
       "name": "ground",
-      "description": "Check cited quotes and exact numeric scales against source documents pinned by lock.v0",
+      "description": "Check HTML-aware cited quotes and exact numeric scales against source documents pinned by lock.v0",
       "status": "available",
       "usage": "verify ground <CLAIMS_JSONL> --bind <NAME=DOCUMENT> --lock <LOCKFILE> [--json] [--explicit] [--no-witness]",
       "read_only": false,
@@ -211,7 +211,9 @@
         "writes_files": false,
         "uses_network": false,
         "emits_report_schema": "verify.report.v1",
-        "default_redaction": "ordinal refs; --explicit includes raw quote and numeric evidence"
+        "default_redaction": "ordinal refs; --explicit includes raw quote and numeric evidence",
+        "quote_resolution": "HTML tags/comments and script/style contents are excluded; omitted byte_span requires exactly one visible normalized match",
+        "ambiguous_quote": "refusal E_BAD_AUTHORING with detail code E_QUOTE_AMBIGUOUS and match_count"
       }
     },
     {

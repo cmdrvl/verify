@@ -15,9 +15,14 @@ use tempfile::TempDir;
 
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 const FIXTURE: &str = "fixtures/grounding/abs_ee_exh_102_excerpt.xml";
+const HTML_FIXTURE: &str = "fixtures/grounding/sec_8k_ex99_1_excerpt.html";
 
 fn fixture_path() -> PathBuf {
     Path::new(WORKSPACE_ROOT).join(FIXTURE)
+}
+
+fn html_fixture_path() -> PathBuf {
+    Path::new(WORKSPACE_ROOT).join(HTML_FIXTURE)
 }
 
 fn run_ground(claims: &Path, document: &Path, lock: &Path, explicit: bool) -> Output {
@@ -241,4 +246,143 @@ fn lock_drift_is_a_reported_refusal() {
     let value = report(&output);
     assert_eq!(value["outcome"], "REFUSAL");
     assert_eq!(value["refusal"]["code"], "E_INPUT_DRIFT");
+}
+
+#[test]
+fn real_sec_html_fixture_resolves_entities_tags_and_numeric_scale() {
+    let dir = TempDir::new().expect("scratch directory");
+    let bytes = fs::read(html_fixture_path()).expect("real HTML fixture reads");
+    let document = dir.path().join("exh99_1-crefimlpa.htm");
+    fs::write(&document, &bytes).expect("document writes");
+    let (amount_start, amount_end) = span(&bytes, b"50,000,000.00");
+    let claims = claims_file(
+        &dir,
+        "html-claims.jsonl",
+        &[
+            json!({
+                "claim_id": "entity-ampersand",
+                "source": "filing",
+                "quote": "Orrick, Herrington & Sutcliffe LLP"
+            }),
+            json!({
+                "claim_id": "entity-nbsp",
+                "source": "filing",
+                "quote": "Exhibit B Mortgage Loan Representations and Warranties"
+            }),
+            json!({
+                "claim_id": "loan-millions",
+                "source": "filing",
+                "quote": "50,000,000.00",
+                "byte_span": {"start": amount_start, "end": amount_end},
+                "value": 50,
+                "unit": "USD",
+                "scale": "millions"
+            }),
+        ],
+    );
+    let lock = lock_file(&dir, &document, sha256(&bytes));
+
+    let output = run_ground(&claims, &document, &lock, false);
+    assert_eq!(output.status.code(), Some(0));
+    let value = report(&output);
+    assert_eq!(value["outcome"], "PASS");
+    assert_eq!(value["summary"]["total_rules"], 4);
+}
+
+#[test]
+fn omitted_span_ambiguity_is_a_typed_refusal_with_match_count() {
+    let dir = TempDir::new().expect("scratch directory");
+    let bytes = fs::read(html_fixture_path()).expect("real HTML fixture reads");
+    let document = dir.path().join("exh99_1-crefimlpa.htm");
+    fs::write(&document, &bytes).expect("document writes");
+    let claims = claims_file(
+        &dir,
+        "ambiguous.jsonl",
+        &[json!({
+            "claim_id": "duplicate-header",
+            "source": "filing",
+            "quote": "CREFI Mortgage Loan Purchase Agreement"
+        })],
+    );
+    let lock = lock_file(&dir, &document, sha256(&bytes));
+
+    let output = run_ground(&claims, &document, &lock, false);
+    assert_eq!(output.status.code(), Some(2));
+    let value = report(&output);
+    assert_eq!(value["outcome"], "REFUSAL");
+    assert_eq!(value["refusal"]["code"], "E_BAD_AUTHORING");
+    assert_eq!(value["refusal"]["detail"]["code"], "E_QUOTE_AMBIGUOUS");
+    assert_eq!(value["refusal"]["detail"]["match_count"], 2);
+}
+
+#[test]
+fn planted_html_negatives_cover_fabrication_span_scale_and_hidden_text() {
+    let dir = TempDir::new().expect("scratch directory");
+    let bytes = fs::read(html_fixture_path()).expect("real HTML fixture reads");
+    let document = dir.path().join("exh99_1-crefimlpa.htm");
+    fs::write(&document, &bytes).expect("document writes");
+    let (crefi_start, crefi_end) = span(&bytes, b"CREFI");
+    let (amount_start, amount_end) = span(&bytes, b"50,000,000.00");
+    let claims = claims_file(
+        &dir,
+        "negative-html.jsonl",
+        &[
+            json!({
+                "claim_id": "one-byte-off",
+                "source": "filing",
+                "quote": "CREFI",
+                "byte_span": {"start": crefi_start + 1, "end": crefi_end + 1}
+            }),
+            json!({
+                "claim_id": "fabricated-quote",
+                "source": "filing",
+                "quote": "Fabricated Street"
+            }),
+            json!({
+                "claim_id": "wrong-thousands-scale",
+                "source": "filing",
+                "quote": "50,000,000.00",
+                "byte_span": {"start": amount_start, "end": amount_end},
+                "value": 50,
+                "unit": "USD",
+                "scale": "thousands"
+            }),
+            json!({
+                "claim_id": "comment-text",
+                "source": "filing",
+                "quote": "Field: Rule-Page"
+            }),
+            json!({
+                "claim_id": "script-text",
+                "source": "filing",
+                "quote": "M01OIG1RMA"
+            }),
+        ],
+    );
+    let lock = lock_file(&dir, &document, sha256(&bytes));
+
+    let redacted = run_ground(&claims, &document, &lock, false);
+    assert_eq!(redacted.status.code(), Some(1));
+    let output = String::from_utf8_lossy(&redacted.stdout);
+    assert!(output.contains("E_SPAN_MISMATCH"), "{output}");
+    assert!(output.contains("E_QUOTE_NOT_FOUND"), "{output}");
+    assert!(output.contains("E_SCALE_MISMATCH"), "{output}");
+    assert!(!output.contains("CREFI"), "raw HTML text leaked: {output}");
+    assert!(
+        !output.contains("50,000,000.00"),
+        "raw numeric text leaked: {output}"
+    );
+    assert!(
+        !output.contains("M01OIG1RMA"),
+        "script text leaked: {output}"
+    );
+
+    let explicit = run_ground(&claims, &document, &lock, true);
+    assert_eq!(explicit.status.code(), Some(1));
+    let explicit_output = String::from_utf8_lossy(&explicit.stdout);
+    assert!(explicit_output.contains("CREFI"), "{explicit_output}");
+    assert!(
+        explicit_output.contains("50,000,000.00"),
+        "{explicit_output}"
+    );
 }

@@ -38,7 +38,7 @@ pub struct GroundingClaim {
     pub claim_id: String,
     pub source: String,
     pub quote: String,
-    pub byte_span: ByteSpan,
+    pub byte_span: Option<ByteSpan>,
     pub numeric: Option<NumericClaim>,
 }
 
@@ -63,11 +63,26 @@ impl GroundingDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroundingError {
-    InvalidClaim { line: usize, detail: String },
+    InvalidClaim {
+        line: usize,
+        detail: String,
+    },
     EmptyClaims,
-    DuplicateClaimId { claim_id: String },
-    MissingSource { claim_id: String, source: String },
-    InvalidSpan { claim_id: String, detail: String },
+    DuplicateClaimId {
+        claim_id: String,
+    },
+    MissingSource {
+        claim_id: String,
+        source: String,
+    },
+    InvalidSpan {
+        claim_id: String,
+        detail: String,
+    },
+    AmbiguousQuote {
+        claim_id: String,
+        match_count: usize,
+    },
     Lock(LockError),
 }
 
@@ -96,6 +111,13 @@ impl std::fmt::Display for GroundingError {
                     "claim {claim_id} has invalid byte_span: {detail}"
                 )
             }
+            Self::AmbiguousQuote {
+                claim_id,
+                match_count,
+            } => write!(
+                formatter,
+                "claim {claim_id} has {match_count} matching normalized quote locations"
+            ),
             Self::Lock(error) => error.fmt(formatter),
         }
     }
@@ -277,7 +299,8 @@ struct RawClaim {
     claim_id: String,
     source: String,
     quote: String,
-    byte_span: RawByteSpan,
+    #[serde(default)]
+    byte_span: Option<RawByteSpan>,
     #[serde(default)]
     value: Option<Number>,
     #[serde(default)]
@@ -373,10 +396,10 @@ pub fn parse_claims_jsonl(input: &[u8]) -> Result<Vec<GroundingClaim>, Grounding
             claim_id: raw.claim_id,
             source: raw.source,
             quote: raw.quote,
-            byte_span: ByteSpan {
-                start: raw.byte_span.start,
-                end: raw.byte_span.end,
-            },
+            byte_span: raw.byte_span.map(|span| ByteSpan {
+                start: span.start,
+                end: span.end,
+            }),
             numeric,
         });
     }
@@ -585,24 +608,14 @@ pub fn evaluate(
                     claim_id: claim.claim_id.clone(),
                     source: claim.source.clone(),
                 })?;
-        if claim.byte_span.start > claim.byte_span.end || claim.byte_span.end > document.bytes.len()
-        {
-            return Err(GroundingError::InvalidSpan {
-                claim_id: claim.claim_id.clone(),
-                detail: format!(
-                    "range {}..{} is outside document length {}",
-                    claim.byte_span.start,
-                    claim.byte_span.end,
-                    document.bytes.len()
-                ),
-            });
-        }
-        let span = &document.bytes[claim.byte_span.start..claim.byte_span.end];
+        let resolution = resolve_quote(claim, document)?;
         report
             .results
-            .push(quote_result(claim, span, &document.bytes));
+            .push(quote_result(claim, &resolution, document));
         if let Some(numeric) = &claim.numeric {
-            report.results.push(numeric_result(claim, numeric, span));
+            report
+                .results
+                .push(numeric_result(claim, numeric, &resolution.normalized_text));
         }
     }
 
@@ -616,18 +629,174 @@ pub fn evaluate(
     Ok(report)
 }
 
-fn quote_result(claim: &GroundingClaim, span: &[u8], document: &[u8]) -> RuleResult {
-    let exact = span == claim.quote.as_bytes();
-    let normalized = std::str::from_utf8(span)
-        .ok()
-        .is_some_and(|span| normalize_whitespace(span) == normalize_whitespace(&claim.quote));
-    let code = if exact || normalized {
-        None
-    } else if quote_occurs(document, &claim.quote) {
-        Some("E_SPAN_MISMATCH")
-    } else {
-        Some("E_QUOTE_NOT_FOUND")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawSpan {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedText {
+    text: String,
+    origins: Vec<RawSpan>,
+}
+
+impl NormalizedText {
+    fn raw_span_for_match(&self, start: usize, end: usize) -> Option<ByteSpan> {
+        if start >= end || end > self.text.len() {
+            return None;
+        }
+        let start_char = self.text[..start].chars().count();
+        let end_char = self.text[..end].chars().count();
+        let first = self.origins.get(start_char)?;
+        let last = self.origins.get(end_char.checked_sub(1)?)?;
+        Some(ByteSpan {
+            start: first.start,
+            end: last.end,
+        })
+    }
+
+    fn overlaps_raw_span(&self, span: &ByteSpan) -> bool {
+        self.origins
+            .iter()
+            .any(|origin| origin.start < span.end && span.start < origin.end)
+    }
+}
+
+#[derive(Debug, Default)]
+struct NormalizedBuilder {
+    text: String,
+    origins: Vec<RawSpan>,
+    pending_whitespace: Option<RawSpan>,
+}
+
+impl NormalizedBuilder {
+    fn push(&mut self, character: char, origin: RawSpan) {
+        if character.is_whitespace() {
+            self.pending_whitespace = Some(match self.pending_whitespace {
+                Some(previous) => RawSpan {
+                    start: previous.start,
+                    end: origin.end,
+                },
+                None => origin,
+            });
+            return;
+        }
+
+        if let Some(origin) = self.pending_whitespace.take()
+            && !self.text.is_empty()
+        {
+            self.text.push(' ');
+            self.origins.push(origin);
+        }
+        self.text.push(character);
+        self.origins.push(origin);
+    }
+
+    fn finish(self) -> NormalizedText {
+        NormalizedText {
+            text: self.text,
+            origins: self.origins,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuoteResolution {
+    raw_span: Option<ByteSpan>,
+    normalized_text: String,
+    failure: Option<&'static str>,
+}
+
+fn resolve_quote(
+    claim: &GroundingClaim,
+    document: &GroundingDocument,
+) -> Result<QuoteResolution, GroundingError> {
+    let target = normalize_whitespace(&claim.quote);
+    let normalized_document = normalize_html(&document.bytes);
+
+    if let Some(span) = &claim.byte_span {
+        if span.start > span.end || span.end > document.bytes.len() {
+            return Err(GroundingError::InvalidSpan {
+                claim_id: claim.claim_id.clone(),
+                detail: format!(
+                    "range {}..{} is outside document length {}",
+                    span.start,
+                    span.end,
+                    document.bytes.len()
+                ),
+            });
+        }
+        let raw = &document.bytes[span.start..span.end];
+        let normalized_span = normalize_html(raw);
+        let html_match = normalized_span.as_ref().is_some_and(|normalized| {
+            normalized.text == target
+                && normalized_document
+                    .as_ref()
+                    .is_some_and(|document| document.overlaps_raw_span(span))
+        });
+        let exact_match = raw == claim.quote.as_bytes()
+            && normalized_document
+                .as_ref()
+                .is_some_and(|document| document.overlaps_raw_span(span));
+        if html_match || exact_match {
+            return Ok(QuoteResolution {
+                raw_span: Some(span.clone()),
+                normalized_text: normalized_span
+                    .map(|normalized| normalized.text)
+                    .unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
+                failure: None,
+            });
+        }
+
+        let failure = normalized_document
+            .as_ref()
+            .is_some_and(|document| !normalized_matches(document, &target).is_empty());
+        return Ok(QuoteResolution {
+            raw_span: Some(span.clone()),
+            normalized_text: normalized_span
+                .map(|normalized| normalized.text)
+                .unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
+            failure: Some(if failure {
+                "E_SPAN_MISMATCH"
+            } else {
+                "E_QUOTE_NOT_FOUND"
+            }),
+        });
+    }
+
+    let Some(normalized_document) = normalized_document else {
+        return Ok(QuoteResolution {
+            raw_span: None,
+            normalized_text: String::new(),
+            failure: Some("E_QUOTE_NOT_FOUND"),
+        });
     };
+    let matches = normalized_matches(&normalized_document, &target);
+    match matches.as_slice() {
+        [] => Ok(QuoteResolution {
+            raw_span: None,
+            normalized_text: String::new(),
+            failure: Some("E_QUOTE_NOT_FOUND"),
+        }),
+        [(start, end)] => Ok(QuoteResolution {
+            raw_span: normalized_document.raw_span_for_match(*start, *end),
+            normalized_text: normalized_document.text[*start..*end].to_owned(),
+            failure: None,
+        }),
+        _ => Err(GroundingError::AmbiguousQuote {
+            claim_id: claim.claim_id.clone(),
+            match_count: matches.len(),
+        }),
+    }
+}
+
+fn quote_result(
+    claim: &GroundingClaim,
+    resolution: &QuoteResolution,
+    document: &GroundingDocument,
+) -> RuleResult {
+    let code = resolution.failure;
     let (rule_id, affected) = match code {
         None => (format!("grounding.{}.quote", claim.claim_id), Vec::new()),
         Some(code) => (
@@ -642,11 +811,13 @@ fn quote_result(claim: &GroundingClaim, span: &[u8], document: &[u8]) -> RuleRes
                 value: Some(json!({
                     "code": code,
                     "quote": claim.quote,
-                    "byte_span": {
-                        "start": claim.byte_span.start,
-                        "end": claim.byte_span.end,
-                    },
-                    "observed": String::from_utf8_lossy(span),
+                    "byte_span": claim.byte_span.as_ref().map(|span| json!({
+                        "start": span.start,
+                        "end": span.end,
+                    })),
+                    "observed": resolution.raw_span.as_ref().map(|span| {
+                        String::from_utf8_lossy(&document.bytes[span.start..span.end]).into_owned()
+                    }),
                 })),
             }],
         ),
@@ -664,15 +835,12 @@ fn quote_result(claim: &GroundingClaim, span: &[u8], document: &[u8]) -> RuleRes
     }
 }
 
-fn quote_occurs(document: &[u8], quote: &str) -> bool {
-    let raw = quote.as_bytes();
-    if document.windows(raw.len()).any(|window| window == raw) {
-        return true;
-    }
-    let Some(document) = std::str::from_utf8(document).ok() else {
-        return false;
-    };
-    normalize_whitespace(document).contains(&normalize_whitespace(quote))
+fn normalized_matches(document: &NormalizedText, target: &str) -> Vec<(usize, usize)> {
+    document
+        .text
+        .match_indices(target)
+        .map(|(start, value)| (start, start + value.len()))
+        .collect()
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -692,6 +860,122 @@ fn normalize_whitespace(value: &str) -> String {
     normalized
 }
 
+fn normalize_html(bytes: &[u8]) -> Option<NormalizedText> {
+    let source = std::str::from_utf8(bytes).ok()?;
+    let mut builder = NormalizedBuilder::default();
+    let mut index = 0;
+    while index < source.len() {
+        let remaining = &source[index..];
+        if remaining.starts_with("<!--") {
+            index = source[index + 4..]
+                .find("-->")
+                .map(|end| index + 4 + end + 3)
+                .unwrap_or(source.len());
+            continue;
+        }
+        if starts_element(source, index, "script") || starts_element(source, index, "style") {
+            let name = if starts_element(source, index, "script") {
+                "script"
+            } else {
+                "style"
+            };
+            index = skip_element(source, index, name);
+            continue;
+        }
+        if remaining.as_bytes().first() == Some(&b'<')
+            && let Some(end) = find_tag_end(source, index)
+        {
+            index = end;
+            continue;
+        }
+        if remaining.as_bytes().first() == Some(&b'&')
+            && let Some((character, end)) = decode_entity(source, index)
+        {
+            builder.push(character, RawSpan { start: index, end });
+            index = end;
+            continue;
+        }
+        let character = remaining.chars().next()?;
+        let end = index + character.len_utf8();
+        builder.push(character, RawSpan { start: index, end });
+        index = end;
+    }
+    Some(builder.finish())
+}
+
+fn starts_element(source: &str, index: usize, name: &str) -> bool {
+    let prefix = format!("<{name}");
+    if !source.as_bytes()[index..].starts_with(prefix.as_bytes()) {
+        return false;
+    }
+    source[index + prefix.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_whitespace() || matches!(character, '>' | '/'))
+}
+
+fn skip_element(source: &str, index: usize, name: &str) -> usize {
+    let opening_end = find_tag_end(source, index).unwrap_or(source.len());
+    let closing_prefix = format!("</{name}");
+    let mut search = opening_end;
+    while let Some(relative) = find_ascii_case_insensitive(&source[search..], &closing_prefix) {
+        let close_start = search + relative;
+        let boundary = source[close_start + closing_prefix.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_whitespace() || character == '>');
+        if boundary {
+            return find_tag_end(source, close_start).unwrap_or(source.len());
+        }
+        search = close_start + closing_prefix.len();
+    }
+    source.len()
+}
+
+fn find_tag_end(source: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, byte) in source.as_bytes()[start..].iter().copied().enumerate() {
+        match quote {
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'>' => return Some(start + offset + 1),
+            None => {}
+        }
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(source: &str, needle: &str) -> Option<usize> {
+    source
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| source.as_bytes()[*index..].starts_with(needle.as_bytes()))
+}
+
+fn decode_entity(source: &str, start: usize) -> Option<(char, usize)> {
+    let remainder = &source[start + 1..];
+    let end = remainder.find(';')?;
+    if end > 32 {
+        return None;
+    }
+    let entity = &remainder[..end];
+    let character = match entity {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{00a0}',
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)?
+        }
+        _ if entity.starts_with('#') => char::from_u32(entity[1..].parse::<u32>().ok()?)?,
+        _ => return None,
+    };
+    Some((character, start + 1 + end + 1))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NumericSurface {
     value: Decimal,
@@ -699,9 +983,8 @@ struct NumericSurface {
     raw: String,
 }
 
-fn numeric_result(claim: &GroundingClaim, numeric: &NumericClaim, span: &[u8]) -> RuleResult {
-    let text = String::from_utf8_lossy(span);
-    let surfaces = numeric_surfaces(&text);
+fn numeric_result(claim: &GroundingClaim, numeric: &NumericClaim, text: &str) -> RuleResult {
+    let surfaces = numeric_surfaces(text);
     let matching = surfaces
         .iter()
         .any(|surface| surface.scale.apply(surface.value) == Some(numeric.target));
@@ -857,6 +1140,10 @@ mod tests {
         )
     }
 
+    fn claim_json_without_span(quote: &str) -> String {
+        format!("{{\"claim_id\":\"C1\",\"source\":\"filing\",\"quote\":{quote:?}}}")
+    }
+
     #[test]
     fn exact_and_whitespace_quotes_and_numeric_scales_pass() {
         let bytes = b"Revenue was $42.5 million.";
@@ -999,5 +1286,73 @@ mod tests {
                 .expect("lock should verify");
             assert_eq!(result["filing"].locks, vec![name]);
         }
+    }
+
+    #[test]
+    fn html_tags_entities_and_cross_tag_whitespace_are_normalized() {
+        let bytes = b"<p>Real&nbsp;<b>&amp;</b>\ntext</p>";
+        let start = 0;
+        let end = bytes.len();
+        let claims =
+            parse_claims_jsonl(claim_json("Real & text", start, end, None, None).as_bytes())
+                .expect("claim parses");
+        let report = evaluate(
+            &claims,
+            &BTreeMap::from([(
+                "filing".to_owned(),
+                GroundingDocument::new("fixture.html", bytes.to_vec()),
+            )]),
+            "sha256:claims",
+            None,
+        )
+        .expect("evaluates");
+        assert_eq!(report.outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn omitted_span_refuses_ambiguous_visible_matches_with_count() {
+        let claims = parse_claims_jsonl(claim_json_without_span("Repeated").as_bytes())
+            .expect("claim parses");
+        let error = evaluate(
+            &claims,
+            &BTreeMap::from([(
+                "filing".to_owned(),
+                GroundingDocument::new(
+                    "fixture.html",
+                    b"<p>Repeated</p><div>Repeated</div>".to_vec(),
+                ),
+            )]),
+            "sha256:claims",
+            None,
+        )
+        .expect_err("ambiguous quote must refuse");
+        assert_eq!(
+            error,
+            GroundingError::AmbiguousQuote {
+                claim_id: "C1".to_owned(),
+                match_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn script_and_comment_text_are_not_visible_to_quote_search() {
+        let claims =
+            parse_claims_jsonl(claim_json_without_span("hidden").as_bytes()).expect("claim parses");
+        let report = evaluate(
+            &claims,
+            &BTreeMap::from([(
+                "filing".to_owned(),
+                GroundingDocument::new(
+                    "fixture.html",
+                    b"<!-- hidden --><script>hidden</script><p>visible</p>".to_vec(),
+                ),
+            )]),
+            "sha256:claims",
+            None,
+        )
+        .expect("non-ambiguous hidden quote is a domain failure");
+        assert_eq!(report.outcome, Outcome::Fail);
+        assert!(report.results[0].rule_id.ends_with("E_QUOTE_NOT_FOUND"));
     }
 }
