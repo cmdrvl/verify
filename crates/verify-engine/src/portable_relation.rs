@@ -7,7 +7,7 @@ use verify_core::{
     report::{AffectedEntry, ResultStatus, RuleResult},
 };
 
-use crate::Relation;
+use crate::{Relation, scalar::value_category};
 
 pub const PORTABLE_RELATION_OPS: &[&str] = &["row_count", "aggregate_compare", "foreign_key"];
 
@@ -190,39 +190,117 @@ fn compute_aggregate(
             }
             numeric_value(sum / relation.rows.len() as f64)
         }
-        AggregateKind::Min(field) => {
-            let mut values = aggregate_values(binding, relation, field)?;
-            let first = values.pop_first().ok_or_else(|| {
-                RelationEngineError::BadExpression(
-                    "aggregate_compare min requires at least one row".to_owned(),
-                )
-            })?;
-            Ok(first)
-        }
-        AggregateKind::Max(field) => {
-            let mut values = aggregate_values(binding, relation, field)?;
-            let last = values.pop_last().ok_or_else(|| {
-                RelationEngineError::BadExpression(
-                    "aggregate_compare max requires at least one row".to_owned(),
-                )
-            })?;
-            Ok(last)
-        }
+        AggregateKind::Min(field) => extremum(binding, relation, field, Extremum::Min),
+        AggregateKind::Max(field) => extremum(binding, relation, field, Extremum::Max),
     }
 }
 
-fn aggregate_values(
+#[derive(Clone, Copy)]
+enum Extremum {
+    Min,
+    Max,
+}
+
+/// `min` and `max` as docs/plan.md defines them: every value non-null and of one scalar type.
+/// The refusal chosen does not depend on row order.
+fn extremum(
     binding: &str,
     relation: &Relation,
     field: &str,
-) -> Result<SortableValueSet, RelationEngineError> {
-    let mut values = SortableValueSet::default();
+    which: Extremum,
+) -> Result<Value, RelationEngineError> {
+    let (name, wanted) = match which {
+        Extremum::Min => ("min", Ordering::Less),
+        Extremum::Max => ("max", Ordering::Greater),
+    };
+
+    let mut values = Vec::with_capacity(relation.rows.len());
     for row in &relation.rows {
-        let value = require_field(binding, row, field)?.clone();
-        ensure_comparable(field, &value)?;
-        values.insert(value);
+        let value = require_field(binding, row, field)?;
+        ensure_comparable(field, value)?;
+        values.push(value);
     }
-    Ok(values)
+    if values.iter().any(|value| value.is_null()) {
+        return Err(RelationEngineError::BadExpression(format!(
+            "aggregate_compare {name} requires non-null values in {binding}.{field}"
+        )));
+    }
+    let Some((&first, rest)) = values.split_first() else {
+        return Err(RelationEngineError::BadExpression(format!(
+            "aggregate_compare {name} requires at least one row"
+        )));
+    };
+    let mixed = || {
+        RelationEngineError::BadExpression(format!(
+            "aggregate field {binding}.{field} must contain values of one scalar type"
+        ))
+    };
+    if rest
+        .iter()
+        .any(|value| value_category(value) != value_category(first))
+    {
+        return Err(mixed());
+    }
+
+    let mut selected = first;
+    for &value in rest {
+        let ordering = extremum_order(value, selected).ok_or_else(mixed)?;
+        if ordering == wanted
+            || (ordering == Ordering::Equal && tie_rank(value) < tie_rank(selected))
+        {
+            selected = value;
+        }
+    }
+    Ok(selected.clone())
+}
+
+/// Order within one scalar type: numbers by exact value, strings by code point, `false` first.
+fn extremum_order(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => exact_numeric_order(left, right),
+        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
+        _ => None,
+    }
+}
+
+/// Compare the numbers as received, never rounding an integer to `f64`. `-0.0` equals `0.0`.
+fn exact_numeric_order(left: &Number, right: &Number) -> Option<Ordering> {
+    match (integer_value(left), integer_value(right)) {
+        (Some(left), Some(right)) => Some(left.cmp(&right)),
+        (Some(left), None) => integer_float_order(left, right.as_f64()?),
+        (None, Some(right)) => integer_float_order(right, left.as_f64()?).map(Ordering::reverse),
+        (None, None) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+    }
+}
+
+fn integer_value(number: &Number) -> Option<i128> {
+    number
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| number.as_u64().map(i128::from))
+}
+
+/// `integer` against a finite `float`: whole parts first, then the float's fraction.
+fn integer_float_order(integer: i128, float: f64) -> Option<Ordering> {
+    let whole = float.trunc();
+    let fraction_order = 0.0_f64.partial_cmp(&(float - whole))?;
+    // The cast saturates beyond i128, which no i64 or u64 reaches, so the order holds.
+    Some(integer.cmp(&(whole as i128)).then(fraction_order))
+}
+
+/// Which of two equal values is reported: an integer over a fraction-form number, and `0.0`
+/// over `-0.0`, so that row order cannot change the report.
+fn tie_rank(value: &Value) -> u8 {
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            let negative_zero = number
+                .as_f64()
+                .is_some_and(|float| float == 0.0 && float.is_sign_negative());
+            if negative_zero { 2 } else { 1 }
+        }
+        _ => 0,
+    }
 }
 
 fn evaluate_comparison(
@@ -479,25 +557,6 @@ enum AggregateKind<'a> {
     Max(&'a str),
 }
 
-#[derive(Default)]
-struct SortableValueSet(BTreeMap<String, Value>);
-
-impl SortableValueSet {
-    fn insert(&mut self, value: Value) {
-        self.0.insert(value_to_sort_key(&value), value);
-    }
-
-    fn pop_first(&mut self) -> Option<Value> {
-        let key = self.0.keys().next().cloned()?;
-        self.0.remove(&key)
-    }
-
-    fn pop_last(&mut self) -> Option<Value> {
-        let key = self.0.keys().next_back().cloned()?;
-        self.0.remove(&key)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -738,6 +797,185 @@ mod tests {
                 field: "balance".to_owned(),
             }
         );
+    }
+
+    /// The value `min` or `max` selects over one column, read before any threshold comparison.
+    fn extremum(function: &str, values: &[Value]) -> Result<Value, RelationEngineError> {
+        let relation = Relation::new(
+            Vec::new(),
+            values
+                .iter()
+                .map(|value| row(&[("v", value.clone())]))
+                .collect(),
+        );
+        let field = Some("v".to_owned());
+        let aggregate = match function {
+            "min" => Aggregate {
+                min: field,
+                ..Default::default()
+            },
+            _ => Aggregate {
+                max: field,
+                ..Default::default()
+            },
+        };
+        super::compute_aggregate("input", &relation, &aggregate)
+    }
+
+    /// `expected` is compared as serialized text, which tells `10` from `10.0` and `0.0` from
+    /// `-0.0`. Every rotation of the rows, forward and reversed, must select the same value.
+    fn assert_extremum(function: &str, values: &[Value], expected: &Value) {
+        let mut rows = values.to_vec();
+        for _ in 0..2 {
+            for _ in 0..rows.len() {
+                rows.rotate_left(1);
+                let selected = extremum(function, &rows).expect("column is orderable");
+                assert_eq!(
+                    selected.to_string(),
+                    expected.to_string(),
+                    "{function} over {rows:?}"
+                );
+            }
+            rows.reverse();
+        }
+    }
+
+    #[test]
+    fn min_and_max_order_numbers_by_value() {
+        let two_pow_53 = 9_007_199_254_740_992_u64;
+        let cases: Vec<(Vec<Value>, Value, Value)> = vec![
+            (vec![json!(9), json!(10)], json!(9), json!(10)),
+            (vec![json!(100), json!(20), json!(3)], json!(3), json!(100)),
+            (vec![json!(-9), json!(-10)], json!(-10), json!(-9)),
+            (
+                vec![json!(-1.5), json!(-3), json!(2), json!(-20.25)],
+                json!(-20.25),
+                json!(2),
+            ),
+            (
+                vec![json!(2.0), json!(10), json!(9.5)],
+                json!(2.0),
+                json!(10),
+            ),
+            (
+                vec![json!(0), json!(i64::MAX), json!(i64::MIN)],
+                json!(i64::MIN),
+                json!(i64::MAX),
+            ),
+            (
+                vec![json!(i64::MAX), json!(u64::MAX), json!(-1)],
+                json!(-1),
+                json!(u64::MAX),
+            ),
+            // Neighbours that share one f64.
+            (
+                vec![json!(two_pow_53), json!(two_pow_53 + 1)],
+                json!(two_pow_53),
+                json!(two_pow_53 + 1),
+            ),
+            (
+                vec![
+                    json!(-9_007_199_254_740_993_i64),
+                    json!(-9_007_199_254_740_992_i64),
+                ],
+                json!(-9_007_199_254_740_993_i64),
+                json!(-9_007_199_254_740_992_i64),
+            ),
+            // An integer against a fraction-form number, without rounding the integer.
+            (
+                vec![json!(two_pow_53 + 1), json!(9_007_199_254_740_992.0)],
+                json!(9_007_199_254_740_992.0),
+                json!(two_pow_53 + 1),
+            ),
+            // u64::MAX is one below 2^64, which is the f64 it would round to.
+            (
+                vec![json!(u64::MAX), json!(18_446_744_073_709_551_616.0)],
+                json!(u64::MAX),
+                json!(18_446_744_073_709_551_616.0),
+            ),
+            (
+                vec![json!(i64::MIN), json!(-1e300), json!(1e300)],
+                json!(-1e300),
+                json!(1e300),
+            ),
+            (
+                vec![json!(-2), json!(-2.5), json!(-1.5)],
+                json!(-2.5),
+                json!(-1.5),
+            ),
+            // Long decimals as the engine receives them, and exponent spellings.
+            (
+                vec![
+                    json!(0.3),
+                    json!(0.30000000000000004),
+                    json!(0.29999999999999993),
+                ],
+                json!(0.29999999999999993),
+                json!(0.30000000000000004),
+            ),
+            (
+                vec![json!(1e-7), json!(0.5), json!(5e-324), json!(1e308)],
+                json!(5e-324),
+                json!(1e308),
+            ),
+        ];
+
+        for (values, minimum, maximum) in &cases {
+            assert_extremum("min", values, minimum);
+            assert_extremum("max", values, maximum);
+        }
+    }
+
+    #[test]
+    fn min_and_max_break_numeric_ties_independently_of_row_order() {
+        for function in ["min", "max"] {
+            assert_extremum(function, &[json!(10), json!(10.0)], &json!(10));
+            assert_extremum(function, &[json!(0.0), json!(-0.0)], &json!(0.0));
+            assert_extremum(function, &[json!(0), json!(-0.0), json!(0.0)], &json!(0));
+            assert_extremum(function, &[json!(-0.0), json!(-0.0)], &json!(-0.0));
+        }
+    }
+
+    #[test]
+    fn min_and_max_keep_string_and_boolean_ordering() {
+        let strings = [json!("9"), json!("10"), json!("a"), json!("A")];
+        assert_extremum("min", &strings, &json!("10"));
+        assert_extremum("max", &strings, &json!("a"));
+        assert_extremum("min", &[json!(true), json!(false)], &json!(false));
+        assert_extremum("max", &[json!(true), json!(false)], &json!(true));
+    }
+
+    #[test]
+    fn min_and_max_refuse_nulls_mixed_types_and_empty_input() {
+        let refused: [(&str, Vec<Value>); 10] = [
+            ("non-null", vec![Value::Null, json!(5)]),
+            ("non-null", vec![json!("a"), Value::Null]),
+            ("non-null", vec![Value::Null]),
+            ("non-null", vec![Value::Null, Value::Null]),
+            // A null outranks a type mixture, whatever the row order.
+            ("non-null", vec![json!(1), json!("1"), Value::Null]),
+            ("one scalar type", vec![json!(1), json!("1")]),
+            ("one scalar type", vec![json!(true), json!(1)]),
+            ("one scalar type", vec![json!("a"), json!(false)]),
+            ("comparable scalar", vec![json!(1), json!([1])]),
+            ("at least one row", Vec::new()),
+        ];
+
+        for function in ["min", "max"] {
+            for (reason, values) in &refused {
+                let mut rows = values.clone();
+                for _ in 0..2 {
+                    let error = extremum(function, &rows)
+                        .expect_err(&format!("{function} over {rows:?} must refuse"));
+                    assert!(
+                        matches!(&error, RelationEngineError::BadExpression(message)
+                            if message.contains(reason)),
+                        "{function} over {rows:?}: {error}"
+                    );
+                    rows.reverse();
+                }
+            }
+        }
     }
 
     #[test]

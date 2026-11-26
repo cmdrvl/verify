@@ -428,6 +428,24 @@ lowered into portable ops or implemented as a dedicated portable rule kind.
 
 Portable op semantics must be executable without DuckDB-specific query text.
 
+#### `aggregate_compare` `min` and `max` semantics
+
+These rules govern the value `min` and `max` select:
+
+- every value in the column must be non-null; any null, including an all-null
+  column, refuses with `E_BAD_EXPR`
+- every value must belong to one scalar type: number, string, or boolean; a
+  column that mixes types refuses with `E_BAD_EXPR`
+- numbers order by their exact value as the executor receives them; selection
+  must not round an integer to compare it with a fractional number, and `-0.0`
+  equals `0.0`
+- strings order by Unicode code point
+- booleans order `false` before `true`
+- zero rows refuses with `E_BAD_EXPR`
+- when equal numbers have different forms, the reported value is independent of
+  row order: an integer is reported over a fraction-form number (`10` over
+  `10.0`), and `0.0` over `-0.0`
+
 #### `not_null` missingness semantics
 
 V0 must pin missingness semantics for string-like batch inputs explicitly.

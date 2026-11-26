@@ -965,8 +965,85 @@ fn row_count_case(rng: &mut Rng) -> OracleCase {
     }
 }
 
-/// Aggregates are generated over non-empty, null-free columns: the plan does not define
-/// aggregates over nulls or over zero rows.
+/// Numbers of different digit counts and both signs, each exact in f64 and none `-0.0`, so
+/// text order and numeric order disagree often and no other filed defect can appear.
+fn digit_count_value(rng: &mut Rng, kind: Kind) -> &'static str {
+    match kind {
+        Kind::Int => rng.pick(&[
+            "0", "1", "2", "9", "10", "11", "99", "100", "101", "999", "1000", "123456", "-1",
+            "-2", "-9", "-10", "-99", "-100", "-1000",
+        ]),
+        Kind::Double => rng.pick(&[
+            "0.0",
+            "1.5",
+            "2.0",
+            "9.5",
+            "10.0",
+            "10.25",
+            "100.0",
+            "999.5",
+            "1000.0",
+            "-1.5",
+            "-9.0",
+            "-10.0",
+            "-100.25",
+            "0.0000152587890625",
+            "1e21",
+        ]),
+        _ => rng.pick(&[
+            "0", "0.5", "2", "9", "10", "10.25", "99.5", "100", "1000", "-1.5", "-2", "-10",
+            "-100.25",
+        ]),
+    }
+}
+
+fn min_max_case(rng: &mut Rng) -> OracleCase {
+    let function = *rng.pick(&["min", "max"]);
+    let kind = *rng.pick(&[Kind::Int, Kind::Double, Kind::Decimal]);
+    let row_count = 2 + rng.below(5);
+    // At least two rows whose magnitudes have different digit counts.
+    let values = loop {
+        let values: Vec<&str> = (0..row_count)
+            .map(|_| digit_count_value(rng, kind))
+            .collect();
+        let digits = |text: &str| {
+            text.trim_start_matches('-')
+                .split(['.', 'e'])
+                .next()
+                .map_or(0, str::len)
+        };
+        if values.iter().any(|v| digits(v) != digits(values[0])) {
+            break values;
+        }
+    };
+    let table = Table {
+        columns: vec![("id", Kind::Text), ("v", kind)],
+        rows: values
+            .iter()
+            .enumerate()
+            .map(|(index, text)| vec![cell(Kind::Text, &format!("r{index}")), cell(kind, text)])
+            .collect(),
+    };
+    let operator = *rng.pick(&["eq", "ne", "gt", "gte", "lt", "lte"]);
+    let expected = table.rows[rng.below(table.rows.len())][1].json.clone();
+    let observed = format!("SELECT {function}(v) FROM input");
+    let condition = comparison_sql(&observed, operator, &sql_literal(&expected, kind), None);
+    let mut aggregate = serde_json::Map::new();
+    aggregate.insert(function.to_owned(), json!("v"));
+    OracleCase {
+        label: "aggregate_compare",
+        check: json!({
+            "op": "aggregate_compare", "binding": "input", "aggregate": aggregate,
+            "compare": comparison_json(operator, &expected, None),
+        }),
+        query: format!("SELECT 1 AS marker WHERE NOT coalesce({condition}, false)"),
+        tables: vec![("input", table)],
+        keyed: false,
+    }
+}
+
+/// Aggregates are generated over non-empty, null-free columns: DuckDB's own aggregates skip
+/// nulls, so it is no oracle there. The `min`/`max` refusals have their own tests.
 fn aggregate_case(rng: &mut Rng) -> OracleCase {
     let function = *rng.pick(&["sum", "avg", "min", "max"]);
     let column = if matches!(function, "sum" | "avg") {
@@ -1196,8 +1273,82 @@ fn arm_s_aggregate_compare_matches_duckdb() {
         0x55,
         600,
         aggregate_case,
-        &[BEAD_F64_ROUNDING, BEAD_MINMAX_TEXT, BEAD_SIGNED_ZERO_ORDER],
+        &[BEAD_F64_ROUNDING, BEAD_SIGNED_ZERO_ORDER],
     );
+}
+
+/// No case here can trigger a filed defect, so the lanes must agree on every one.
+#[test]
+fn arm_s_min_max_orders_numbers_by_value() {
+    run_oracle_arm(0x57, 600, min_max_case, &[]);
+}
+
+/// Both paths over the same rows: the embedded executor and `verify run` over typed Parquet.
+fn min_max_in_both_paths(
+    table: &Table,
+    function: &str,
+    operator: &str,
+    expected: Value,
+) -> (Verdict, String) {
+    let check = aggregate(function, operator, expected);
+    let embedded = portable_verdict(
+        &artifact(&["input"], "portable", check.clone()),
+        &[("input", table)],
+    );
+    (embedded, repro_outcome(&[("input", table)], check))
+}
+
+/// A null, or a column that is all null, has no `min` or `max`. Batch reports the refusal as
+/// `E_BAD_CONSTRAINTS` where the plan says `E_BAD_EXPR`; that is bd-uj2.
+#[test]
+fn min_max_over_nulls_refuse_in_both_paths() {
+    for values in [
+        vec![None, Some("5")],
+        vec![Some("5"), None],
+        vec![None, None],
+    ] {
+        let table = single_column(Kind::Int, &values);
+        for function in ["min", "max"] {
+            // Both operators passed or failed on some of these before bd-nx1.
+            for (operator, expected) in [("ne", json!(7)), ("lte", json!(9))] {
+                assert_eq!(
+                    min_max_in_both_paths(&table, function, operator, expected),
+                    (
+                        Verdict::Refused("E_BAD_EXPR".to_owned()),
+                        "E_BAD_CONSTRAINTS".to_owned()
+                    ),
+                    "{function} {operator} over {values:?}"
+                );
+            }
+        }
+    }
+
+    // An empty CSV cell loads as null.
+    let directory = tempdir().expect("scratch");
+    let path = directory.path().join("input.csv");
+    fs::write(&path, "id,v\nr0,\nr1,5\n").expect("csv written");
+    let constraints = artifact(&["input"], "portable", aggregate("max", "lte", json!(9)));
+    let report = cli_report(directory.path(), &constraints, &[("input", &path)]);
+    assert_eq!(essence_text(&report), "E_BAD_CONSTRAINTS");
+}
+
+/// Typed batch columns cannot mix scalar types, so only an embedded caller can.
+#[test]
+fn min_max_over_mixed_types_refuse_embedded() {
+    for other in [json!("1"), json!(true)] {
+        let mut table = single_column(Kind::Int, &[Some("10"), Some("9")]);
+        table.rows[1][1].json = other.clone();
+        for function in ["min", "max"] {
+            assert_eq!(
+                portable_verdict(
+                    &artifact(&["input"], "portable", aggregate(function, "ne", json!(7))),
+                    &[("input", &table)],
+                ),
+                Verdict::Refused("E_BAD_EXPR".to_owned()),
+                "{function} over 10 and {other}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1216,7 +1367,6 @@ fn arm_s_row_predicate_matches_duckdb() {
 // forces its removal. The correct behaviour of each is asserted by an ignored repro below.
 // ---------------------------------------------------------------------------
 
-const BEAD_MINMAX_TEXT: &str = "bd-nx1";
 const BEAD_F64_ROUNDING: &str = "bd-1t5";
 const BEAD_SIGNED_ZERO_ORDER: &str = "bd-der";
 const BEAD_NUMBER_TEXT_IDENTITY: &str = "bd-v3r";
@@ -1301,6 +1451,47 @@ fn strings(value: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// The documented `min`/`max` value of a null-free column of one physical type, written
+/// independently of the engine: integers as integers, other numbers by value with `0.0`
+/// preferred over `-0.0`, strings by code point, and `false` before `true`.
+fn documented_extremum(
+    function: &str,
+    kind: Kind,
+    values: impl Iterator<Item = Value>,
+) -> Option<Value> {
+    use std::cmp::Ordering;
+    let order = |left: &Value, right: &Value| -> Option<Ordering> {
+        match kind {
+            Kind::Int => Some(left.as_i64()?.cmp(&right.as_i64()?)),
+            Kind::Double | Kind::Decimal => left.as_f64()?.partial_cmp(&right.as_f64()?),
+            Kind::Text => Some(left.as_str()?.cmp(right.as_str()?)),
+            Kind::Bool => Some(left.as_bool()?.cmp(&right.as_bool()?)),
+        }
+    };
+    let wanted = if function == "min" {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    };
+    let mut selected: Option<Value> = None;
+    for value in values {
+        let replace = match &selected {
+            None => true,
+            Some(current) => {
+                let found = order(&value, current)?;
+                found == wanted
+                    || (found == Ordering::Equal
+                        && is_negative_zero(current)
+                        && !is_negative_zero(&value))
+            }
+        };
+        if replace {
+            selected = Some(value);
+        }
+    }
+    selected
+}
+
 /// A model of the engine's present behaviour, used only to confirm that a mismatch is exactly
 /// the filed defect and not something else in the same case.
 fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
@@ -1371,8 +1562,7 @@ fn current_engine_model(case: &OracleCase) -> Option<Verdict> {
                     }
                     Value::Number(serde_json::Number::from_f64(sum)?)
                 }
-                "min" => values.min_by_key(text_identity)?,
-                _ => values.max_by_key(text_identity)?,
+                _ => documented_extremum(function, input.kind(column.as_str()?), values)?,
             };
             let compare = &case.check["compare"];
             let (operator, expected) = first_entry(compare);
@@ -1455,34 +1645,6 @@ fn oracle_defect_triggers(case: &OracleCase) -> Vec<&'static str> {
         .is_some_and(|v| v.unsigned_abs() >= (1 << 53));
     if wide_literal || cells.iter().any(|(kind, cell)| beyond_f64(*kind, cell)) {
         triggers.push(BEAD_F64_ROUNDING);
-    }
-    let aggregate = (case.label == "aggregate_compare")
-        .then(|| first_entry(&case.check["aggregate"]).0.to_owned());
-    if let Some(function @ ("min" | "max")) = aggregate.as_deref() {
-        let numbers: Vec<&Value> = cells
-            .iter()
-            .map(|(_, cell)| &cell.json)
-            .filter(|v| v.is_number())
-            .collect();
-        let by_text = if function == "min" {
-            numbers.iter().min_by_key(|v| text_identity(v))
-        } else {
-            numbers.iter().max_by_key(|v| text_identity(v))
-        };
-        let numeric = |a: &&&Value, b: &&&Value| {
-            a.as_f64()
-                .unwrap_or_default()
-                .partial_cmp(&b.as_f64().unwrap_or_default())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        };
-        let by_value = if function == "min" {
-            numbers.iter().min_by(numeric)
-        } else {
-            numbers.iter().max_by(numeric)
-        };
-        if by_text.and_then(|v| v.as_f64()) != by_value.and_then(|v| v.as_f64()) {
-            triggers.push(BEAD_MINMAX_TEXT);
-        }
     }
     let ordered = match case.label {
         "predicate" => !matches!(first_entry(&case.check["expr"]).0, "eq" | "ne"),
@@ -1999,7 +2161,6 @@ fn predicate(operator: &str, literal: Value) -> Value {
 }
 
 #[test]
-#[ignore = "bd-nx1: min/max compare numbers by their text"]
 fn repro_max_of_9_and_10_is_10() {
     let table = single_column(Kind::Int, &[Some("9"), Some("10")]);
     let max = repro_outcome(&[("input", &table)], aggregate("max", "lte", json!(9)));
