@@ -1,7 +1,7 @@
 {
   "schema_version": "operator.v1",
   "name": "verify",
-  "tool_version": "0.6.1",
+  "tool_version": "0.7.0",
   "contract_version": "1.0.0",
   "description": "Deterministic constraint evaluation over already-canonical named relations",
   "repository": "https://github.com/cmdrvl/verify",
