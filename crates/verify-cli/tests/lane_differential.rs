@@ -1322,14 +1322,30 @@ fn min_max_over_nulls_refuse_in_both_paths() {
             }
         }
     }
+}
 
-    // An empty CSV cell loads as null.
+/// An empty CSV cell is the empty string, not null, and it makes the whole column strings, so
+/// the null rule never applies: `min` selects `""` and `max` orders the digits as text.
+#[test]
+fn min_max_over_a_csv_column_with_an_empty_cell_order_strings() {
     let directory = tempdir().expect("scratch");
     let path = directory.path().join("input.csv");
-    fs::write(&path, "id,v\nr0,\nr1,5\n").expect("csv written");
-    let constraints = artifact(&["input"], "portable", aggregate("max", "lte", json!(9)));
-    let report = cli_report(directory.path(), &constraints, &[("input", &path)]);
-    assert_eq!(essence_text(&report), "E_BAD_CONSTRAINTS");
+    fs::write(&path, "id,v\nr0,\nr1,9\nr2,10\n").expect("csv written");
+    let outcome = |check: Value| {
+        let constraints = artifact(&["input"], "portable", check);
+        essence_text(&cli_report(
+            directory.path(),
+            &constraints,
+            &[("input", &path)],
+        ))
+    };
+    assert_eq!(outcome(aggregate("min", "eq", json!(""))), "PASS");
+    assert_eq!(outcome(aggregate("max", "eq", json!("9"))), "PASS");
+    // A numeric threshold cannot be ordered against a string, so this refuses.
+    assert_eq!(
+        outcome(aggregate("max", "lte", json!(9))),
+        "E_BAD_CONSTRAINTS"
+    );
 }
 
 /// Typed batch columns cannot mix scalar types, so only an embedded caller can.
