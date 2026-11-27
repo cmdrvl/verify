@@ -1510,3 +1510,317 @@ fn stated_units_pass() {
         ),
     ]);
 }
+
+/// Documents that put a multi-character marker in front of the amount, with the quote that
+/// starts inside it and the quote that holds all of it.
+const PREFIXED: [(&str, &str, &str); 16] = [
+    (
+        "Cash totaled C$41.2 million.",
+        "$41.2 million",
+        "C$41.2 million",
+    ),
+    (
+        "Cash totaled CA$41.2 million.",
+        "$41.2 million",
+        "CA$41.2 million",
+    ),
+    (
+        "Cash totaled US$41.2 million.",
+        "$41.2 million",
+        "US$41.2 million",
+    ),
+    (
+        "Cash totaled HK$41.2 million.",
+        "$41.2 million",
+        "HK$41.2 million",
+    ),
+    (
+        "Cash totaled A$41.2 million.",
+        "$41.2 million",
+        "A$41.2 million",
+    ),
+    (
+        "Cash totaled AU$41.2 million.",
+        "$41.2 million",
+        "AU$41.2 million",
+    ),
+    (
+        "Cash totaled NZ$41.2 million.",
+        "$41.2 million",
+        "NZ$41.2 million",
+    ),
+    (
+        "Cash totaled S$41.2 million.",
+        "$41.2 million",
+        "S$41.2 million",
+    ),
+    (
+        "Cash totaled R$41.2 million.",
+        "$41.2 million",
+        "R$41.2 million",
+    ),
+    (
+        "Cash totaled NT$41.2 million.",
+        "$41.2 million",
+        "NT$41.2 million",
+    ),
+    (
+        "Cash totaled U.S.$41.2 million.",
+        "$41.2 million",
+        "U.S.$41.2 million",
+    ),
+    (
+        "Cash totaled Cdn.$41.2 million.",
+        "$41.2 million",
+        "Cdn.$41.2 million",
+    ),
+    (
+        "Cash totaled C&#36;41.2 million.",
+        "$41.2 million",
+        "C$41.2 million",
+    ),
+    (
+        "Cash totaled <b>C</b>$41.2 million.",
+        "$41.2 million",
+        "C$41.2 million",
+    ),
+    (
+        "Cash totaled CN\u{a5}41.2 million.",
+        "\u{a5}41.2 million",
+        "CN\u{a5}41.2 million",
+    ),
+    (
+        "Cash totaled E\u{a3}41.2 million.",
+        "\u{a3}41.2 million",
+        "E\u{a3}41.2 million",
+    ),
+];
+
+#[test]
+fn a_quote_may_not_start_or_end_inside_a_currency_marker() {
+    let mut cases = Vec::new();
+    for (document, inside, _) in PREFIXED {
+        cases.push(case(document, document, inside, None));
+        cases.push(case(document, document, inside, n("41.2", "millions")));
+    }
+    cases.extend([
+        spanned(
+            "span starts inside C$",
+            "Cash totaled C$41.2 million.",
+            "$41.2 million",
+            None,
+            "$41.2 million",
+        ),
+        spanned(
+            "span starts inside US$, numeric",
+            "Cash totaled US$41.2 million.",
+            "$41.2 million",
+            n("41.2", "millions"),
+            "$41.2 million",
+        ),
+        spanned(
+            "span ends inside C$",
+            "Cash totaled C$41.2 million.",
+            "Cash totaled C",
+            None,
+            "Cash totaled C",
+        ),
+        case(
+            "starts inside U.S.$, after the first dot",
+            "Cash totaled U.S.$41.2 million.",
+            "S.$41.2 million",
+            None,
+        ),
+        case(
+            "ends inside C$",
+            "Cash totaled C$41.2 million.",
+            "Cash totaled C",
+            None,
+        ),
+        case(
+            "ends inside U.S.$",
+            "Cash totaled U.S.$41.2 million.",
+            "Cash totaled U",
+            None,
+        ),
+        case(
+            "ends inside a marker after the number",
+            "We paid 41.2 million C$ today.",
+            "41.2 million C",
+            None,
+        ),
+        case(
+            "ends inside Canadian dollars",
+            "We paid 41.2 million Canadian dollars.",
+            "41.2 million Canadian",
+            None,
+        ),
+        case(
+            "ends inside Canadian dollars, numeric",
+            "We paid 41.2 million Canadian dollars.",
+            "41.2 million Canadian",
+            n("41.2", "millions"),
+        ),
+        case(
+            "ends inside Hong Kong dollars",
+            "We paid 41.2 million Hong Kong dollars.",
+            "41.2 million Hong Kong",
+            None,
+        ),
+        case(
+            "ends inside U.S. dollars",
+            "We paid 41.2 million U.S. dollars.",
+            "41.2 million U",
+            None,
+        ),
+        case(
+            "ends after the first words of U.S. dollars",
+            "We paid 41.2 million U.S. dollars.",
+            "41.2 million U.S.",
+            None,
+        ),
+        case(
+            "ends inside pounds sterling",
+            "We paid 41.2 million pounds sterling.",
+            "41.2 million pounds",
+            None,
+        ),
+        case(
+            "starts inside Canadian dollars",
+            "We paid 41.2 million Canadian dollars to them.",
+            "dollars to them",
+            None,
+        ),
+        spanned(
+            "span ends inside Canadian dollars",
+            "We paid 41.2 million Canadian dollars.",
+            "41.2 million Canadian",
+            None,
+            "41.2 million Canadian",
+        ),
+    ]);
+    assert_none_pass(&cases);
+}
+
+#[test]
+fn letters_attached_to_a_currency_sign_change_which_currency_it_is() {
+    assert_none_pass(&[
+        case(
+            "Egyptian pound claimed as GBP",
+            "Cash totaled E\u{a3}41.2 million.",
+            "E\u{a3}41.2 million",
+            u("41.2", "millions", "GBP"),
+        ),
+        case(
+            "Egyptian pound claimed as pound sign",
+            "Cash totaled E\u{a3}41.2 million.",
+            "E\u{a3}41.2 million",
+            u("41.2", "millions", "\u{a3}"),
+        ),
+        case(
+            "yuan sign claimed as bare yen",
+            "Cash totaled CN\u{a5}41.2 million.",
+            "CN\u{a5}41.2 million",
+            u("41.2", "millions", "\u{a5}"),
+        ),
+        case(
+            "Cdn. dollar claimed as a bare dollar",
+            "Cash totaled Cdn.$41.2 million.",
+            "Cdn.$41.2 million",
+            u("41.2", "millions", "$"),
+        ),
+    ]);
+}
+
+#[test]
+fn quotes_around_whole_currency_markers_still_pass() {
+    let mut cases = Vec::new();
+    for (document, _, whole) in PREFIXED {
+        // The raw-markup rows read as `C$` once normalized.
+        cases.push(case(document, document, whole, None));
+        cases.push(case(document, document, whole, n("41.2", "millions")));
+    }
+    cases.extend([
+        case(
+            "starts before the marker",
+            "Cash totaled US$41.2 million.",
+            "totaled US$41.2 million",
+            n("41.2", "millions"),
+        ),
+        case(
+            "starts after the whole marker",
+            "Cash totaled C$41.2 million.",
+            "41.2 million",
+            n("41.2", "millions"),
+        ),
+        case(
+            "a bare dollar sign of the document",
+            CASH,
+            "$41.2 million",
+            n("41.2", "millions"),
+        ),
+        case(
+            "a bare dollar sign, claimed as such",
+            CASH,
+            "$41.2 million",
+            u("41.2", "millions", "$"),
+        ),
+        case(
+            "a bare dollar sign after a colon",
+            "Total:$5 million.",
+            "$5 million",
+            n("5", "millions"),
+        ),
+        case(
+            "a bare dollar sign after a longer word",
+            "They totaled$5 million.",
+            "$5 million",
+            None,
+        ),
+        spanned(
+            "span of a bare dollar amount",
+            CASH,
+            "$41.2 million",
+            n("41.2", "millions"),
+            "$41.2 million",
+        ),
+        spanned(
+            "span of a whole marker",
+            "Cash totaled C$41.2 million.",
+            "C$41.2 million",
+            n("41.2", "millions"),
+            "C$41.2 million",
+        ),
+        case(
+            "ends just before the marker",
+            "Cash totaled C$41.2 million.",
+            "Cash totaled",
+            None,
+        ),
+        case(
+            "ends before a currency phrase",
+            "We paid 41.2 million Canadian dollars.",
+            "41.2 million",
+            n("41.2", "millions"),
+        ),
+        case(
+            "holds a whole currency phrase",
+            "We paid 41.2 million Canadian dollars.",
+            "41.2 million Canadian dollars",
+            u("41.2", "millions", "CAD"),
+        ),
+        case(
+            "starts after a currency phrase",
+            "We paid 41.2 million Canadian dollars to them.",
+            "to them",
+            None,
+        ),
+        case(
+            "the same words away from a number",
+            "Canadian dollars fell.",
+            "Canadian",
+            None,
+        ),
+    ]);
+    assert_all_pass(&cases);
+}
