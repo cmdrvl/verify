@@ -18,7 +18,9 @@ repository = "https://github.com/cmdrvl/verify"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: a number's text is read as the nearest f64. The default parser can be one
+# step off, so a rule literal did not equal the same text in the data.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 opt-level = "z"

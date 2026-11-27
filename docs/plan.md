@@ -609,6 +609,14 @@ operator in v0. Example:
 This is the minimum needed to express structural tournament rules without
 smuggling hidden semantics into the evaluator.
 
+#### Reading number text
+
+In a compiled constraint artifact and in portable authoring, a number written
+with a fraction or an exponent is read as the `f64` nearest its text. The same
+text in a rule and in loaded data is therefore the same number, and compiling
+then running agrees with the one-step path. This is correct rounding, not exact
+decimal arithmetic: distinct texts can still share one `f64`.
+
 #### Predicate scalar comparability
 
 Predicate comparisons are type-strict. Executors must not inherit coercion
