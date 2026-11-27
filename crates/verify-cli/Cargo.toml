@@ -3,7 +3,7 @@ name = "verify-cli"
 # Explicit, not `version.workspace = true`: spine-rules' r006_operator_version_matches_cargo_toml
 # reads this file and rejects workspace-inherited versions. `tests/family_contract.rs`
 # fails if it drifts from `[workspace.package] version` in the root Cargo.toml.
-version = "0.7.5"
+version = "0.7.6"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
