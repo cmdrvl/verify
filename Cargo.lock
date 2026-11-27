@@ -549,6 +549,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "cmdrvl-core"
+version = "0.1.0"
+source = "git+https://github.com/cmdrvl/core?rev=a3dad0b1af2eeb8036625b25f3d9ff94c3a1ef0e#a3dad0b1af2eeb8036625b25f3d9ff94c3a1ef0e"
+dependencies = [
+ "blake3",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "cmdrvl-tabular"
 version = "0.0.1"
 source = "git+https://github.com/cmdrvl/tabular?rev=f461f34d221cbce098857706afe51adbee0872f4#f461f34d221cbce098857706afe51adbee0872f4"
@@ -2598,8 +2610,8 @@ name = "verify-cli"
 version = "0.7.6"
 dependencies = [
  "clap",
+ "cmdrvl-core",
  "duckdb",
- "hmac",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2624,6 +2636,7 @@ name = "verify-duckdb"
 version = "0.7.6"
 dependencies = [
  "blake3",
+ "cmdrvl-core",
  "cmdrvl-tabular",
  "csv",
  "duckdb",
@@ -2640,9 +2653,9 @@ name = "verify-engine"
 version = "0.7.6"
 dependencies = [
  "blake3",
+ "cmdrvl-core",
  "serde",
  "serde_json",
- "sha2",
  "verify-core",
 ]
 

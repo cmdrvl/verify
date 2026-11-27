@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cmdrvl_core::hash::{self, Algorithm};
 use serde::Deserialize;
 use serde_json::{Number, Value, json};
-use sha2::{Digest, Sha256};
 use verify_core::{
     constraint::{BindingKind, Severity},
     order::sort_report,
@@ -431,6 +431,9 @@ struct LockedMember {
 
 /// Verify each in-memory document against the same lock.v0 prefix semantics as
 /// the DuckDB batch path, without importing DuckDB into this crate.
+///
+/// Member matching stays local on purpose (cmd-zjr): `cmdrvl_core::lockfile` refuses inputs
+/// this accepts, and its verdict does not say which lock vouched. Only hashing is shared.
 pub fn verify_locks(
     lock_files: &[(String, Vec<u8>)],
     documents: &BTreeMap<String, GroundingDocument>,
@@ -565,19 +568,13 @@ fn is_supported_hash(hash: &str) -> bool {
     digest.len() == expected_len && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// `bytes` hashed with the algorithm `expected` names. `None` if unsupported.
 fn hash_bytes(expected: &str, bytes: &[u8]) -> Option<String> {
-    let (algorithm, _) = expected.split_once(':')?;
-    match algorithm {
-        "sha256" => Some(sha256_hash(bytes)),
-        "blake3" => Some(format!("blake3:{}", blake3::hash(bytes).to_hex())),
-        _ => None,
-    }
+    Algorithm::of(expected).map(|algorithm| hash::hash_bytes(algorithm, bytes))
 }
 
 fn sha256_hash(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    hash::hash_bytes(Algorithm::Sha256, bytes)
 }
 
 /// Evaluate all claims into the existing verify.report.v1 structures.

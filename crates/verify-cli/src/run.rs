@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args};
+use cmdrvl_core::hash::{Algorithm, hash_bytes};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use verify_core::{
     constraint::{
         Check, ConstraintSet, MembershipOperand, Portability, PredicateExpression,
@@ -912,9 +912,7 @@ pub(crate) fn report_to_result(
 }
 
 pub(crate) fn sha256_of_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    hash_bytes(Algorithm::Sha256, bytes)
 }
 
 fn parse_bind_args(binds: &[String]) -> Result<Vec<BatchBindingInput>, String> {

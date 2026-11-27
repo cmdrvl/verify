@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use cmdrvl_core::hash::{Algorithm, hash_bytes};
 use duckdb::Connection;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use verify_core::{
     constraint::{Binding, ConstraintSet},
     refusal::{Refusal, RefusalCode},
@@ -586,10 +586,7 @@ fn file_sha256(path: &Path, binding: &str) -> Result<String, BatchBindingError> 
         path: path.to_path_buf(),
         source,
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    Ok(format!("sha256:{digest:x}"))
+    Ok(hash_bytes(Algorithm::Sha256, &bytes))
 }
 
 fn describe_relation(

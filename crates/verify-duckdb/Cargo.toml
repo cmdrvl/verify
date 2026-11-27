@@ -21,6 +21,7 @@ duckdb = { version = "1.4.4", features = ["json", "parquet"] }
 serde.workspace = true
 serde_json.workspace = true
 blake3 = "1.8"
+cmdrvl-core.workspace = true
 # Shared reader for Excel bindings. Pinned by rev; zstd (a C dependency for Parquet) is not
 # needed because Parquet bindings go through DuckDB, not this crate.
 cmdrvl-tabular = { git = "https://github.com/cmdrvl/tabular", rev = "f461f34d221cbce098857706afe51adbee0872f4", default-features = false }

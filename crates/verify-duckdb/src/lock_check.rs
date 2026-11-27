@@ -1,5 +1,14 @@
+//! `--lock` checking for `verify run`.
+//!
+//! Member matching stays local on purpose (cmd-zjr): `cmdrvl_core::lockfile` refuses inputs
+//! this accepts, and its verdict does not say which lock vouched, which reports need. Only
+//! the choice of algorithm is shared. `verify-engine`'s `grounding` module has a second copy
+//! of the matching for `verify ground`, with two differences: it rejects a lock holding any
+//! unusable hash, and it has no empty-file-name guard.
+
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
+use cmdrvl_core::hash::Algorithm;
 use serde::Deserialize;
 use serde_json::json;
 use verify_core::{
@@ -31,52 +40,36 @@ struct LockMember {
     content_hash: Option<String>,
 }
 
-/// Hash algorithms a lock member may name. Anything else is refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HashAlgorithm {
-    Sha256,
-    Blake3,
-}
+/// `<algorithm>:<lowercase hex>` of the file at `path`, streamed (cmdrvl-core hashes only
+/// bytes already in memory).
+fn digest_file(algorithm: Algorithm, path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
 
-impl HashAlgorithm {
-    fn of(hash: &str) -> Option<Self> {
-        match hash.split_once(':')?.0 {
-            "sha256" => Some(Self::Sha256),
-            "blake3" => Some(Self::Blake3),
-            _ => None,
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    match algorithm {
+        Algorithm::Sha256 => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(format!("sha256:{:x}", hasher.finalize()))
         }
-    }
-
-    /// `<algorithm>:<lowercase hex>` of the file at `path`, streamed.
-    fn digest_file(self, path: &std::path::Path) -> std::io::Result<String> {
-        use std::io::Read;
-
-        let mut file = fs::File::open(path)?;
-        let mut buffer = [0_u8; 64 * 1024];
-        match self {
-            Self::Sha256 => {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..read]);
+        Algorithm::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
                 }
-                Ok(format!("sha256:{:x}", hasher.finalize()))
+                hasher.update(&buffer[..read]);
             }
-            Self::Blake3 => {
-                let mut hasher = blake3::Hasher::new();
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    hasher.update(&buffer[..read]);
-                }
-                Ok(format!("blake3:{}", hasher.finalize().to_hex()))
-            }
+            Ok(format!("blake3:{}", hasher.finalize().to_hex()))
         }
     }
 }
@@ -283,7 +276,7 @@ pub fn verify_locks(
         let mut vouching_locks: Vec<String> = Vec::new();
         let mut first_drift: Option<(String, String)> = None;
         for member in candidates {
-            let Some(algorithm) = HashAlgorithm::of(&member.expected_hash) else {
+            let Some(algorithm) = Algorithm::of(&member.expected_hash) else {
                 return Err(LockError::BadLock {
                     path: member.lock_path.clone(),
                     detail: format!(
@@ -294,15 +287,13 @@ pub fn verify_locks(
             };
             // The binding already carries the sha256 of its bytes; anything else is
             // computed from the same file the binding was loaded from.
-            let observed = if algorithm == HashAlgorithm::Sha256 {
+            let observed = if algorithm == Algorithm::Sha256 {
                 content_hash.clone()
             } else {
-                algorithm
-                    .digest_file(binding.source_path())
-                    .map_err(|error| LockError::Io {
-                        path: binding.source_path().to_path_buf(),
-                        detail: error.to_string(),
-                    })?
+                digest_file(algorithm, binding.source_path()).map_err(|error| LockError::Io {
+                    path: binding.source_path().to_path_buf(),
+                    detail: error.to_string(),
+                })?
             };
             if observed == member.expected_hash {
                 if !vouching_locks.contains(&member.lock_name) {

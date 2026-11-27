@@ -77,16 +77,17 @@ path = "../../tests/binding_qualified_determinism.rs"
 
 [dependencies]
 clap.workspace = true
+cmdrvl-core.workspace = true
 duckdb = "1.4.4"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
-hmac = "0.12"
-sha2 = "0.10"
 verify-core = { path = "../verify-core" }
 verify-duckdb = { path = "../verify-duckdb" }
 verify-engine = { path = "../verify-engine" }
 
 [dev-dependencies]
+# Tests compute expected digests without going through cmdrvl-core.
+sha2 = "0.10"
 spine-rules = { git = "https://github.com/cmdrvl/spine-rules" }
 tempfile = "3"

@@ -44,6 +44,9 @@ pub fn sort_report(report: &mut VerifyReport) {
     sort_rule_results(&mut report.results);
 }
 
+/// serde_json's own text, in field and insertion order. Despite the name this is NOT
+/// `cmdrvl_core::sorted_compact` or `jcs`, which sort members; witness ids depend on these
+/// bytes, so it stays local (cmd-zjr).
 pub fn canonical_json_string<T>(value: &T) -> serde_json::Result<String>
 where
     T: Serialize,

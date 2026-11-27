@@ -1,3 +1,11 @@
+//! The local witness ledger.
+//!
+//! Serialization and the record id stay local on purpose (cmd-zjr). Ledger lines keep
+//! insertion order (`cmdrvl-tabular` turns on serde_json's `preserve_order` for this
+//! binary), so neither `cmdrvl_core::sorted_compact` nor `cmdrvl_core::jcs` writes the same
+//! bytes, and the id is FNV-1a 64 of those bytes, which core does not provide.
+//! `tests/released_parity.rs` fails if either changes.
+
 use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},

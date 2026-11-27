@@ -23,45 +23,31 @@
 //! What this is NOT: column names, binding names, rule ids, the rule's own SQL or
 //! predicate text, file paths and counts are not redacted. Equality of values inside one
 //! output is visible in both modes, and across outputs in keyed mode.
+//!
+//! The key rule, the keyed HMAC and the ref numbering come from `cmdrvl_core::redact`
+//! (the raw-bytes keyed marker; [`Namespace::ROW`] for keys, [`Namespace::VALUE`] for cells). What
+//! stays here: reading `VERIFY_REDACTION_KEY` (no other variable is read), the bytes that
+//! are marked (`canonical`, below: serde_json's own text, NOT a core serializer, which would
+//! reorder object members and change markers) and the `E_REDACTION_KEY` refusal.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-use hmac::{Hmac, Mac};
+use cmdrvl_core::redact::{self, Namespace};
+pub use cmdrvl_core::redact::{KeyError, MIN_KEY_BYTES};
 use serde_json::Value;
-use sha2::Sha256;
 use verify_core::{refusal::RefusalCode, report::VerifyReport};
 
 pub const ENV_KEY: &str = "VERIFY_REDACTION_KEY";
-pub const MIN_KEY_BYTES: usize = 16;
-pub const REF_PREFIX: &str = "redacted:ref:";
-pub const HMAC_PREFIX: &str = "redacted:hmac-sha256:";
 const REDACTED_TEXT: &str =
     "details withheld by default redaction; pass --explicit to include them";
 
-/// Why `VERIFY_REDACTION_KEY` was refused. Never carries the key or its length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyError {
-    Empty,
-    TooShort,
-}
-
-impl KeyError {
-    pub const fn reason(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::TooShort => "too_short",
-        }
-    }
-}
-
 /// An operator-held redaction key. `Debug` never prints the bytes.
 #[derive(Clone)]
-pub struct RedactionKey(Vec<u8>);
+pub struct RedactionKey(redact::RedactionKey);
 
 impl std::fmt::Debug for RedactionKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("RedactionKey(<withheld>)")
+        std::fmt::Debug::fmt(&self.0, formatter)
     }
 }
 
@@ -76,13 +62,7 @@ impl RedactionKey {
         let bytes = std::os::unix::ffi::OsStringExt::into_vec(value);
         #[cfg(not(unix))]
         let bytes = value.to_string_lossy().into_owned().into_bytes();
-        if bytes.is_empty() {
-            return Err(KeyError::Empty);
-        }
-        if bytes.len() < MIN_KEY_BYTES {
-            return Err(KeyError::TooShort);
-        }
-        Ok(Some(Self(bytes)))
+        redact::RedactionKey::new(bytes).map(|key| Some(Self(key)))
     }
 
     pub fn from_env() -> Result<Option<Self>, KeyError> {
@@ -91,15 +71,7 @@ impl RedactionKey {
 
     /// `redacted:hmac-sha256:<32 hex>` over the canonical JSON of `value`.
     pub fn marker(&self, value: &Value) -> String {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC accepts a key of any length");
-        mac.update(canonical(value).as_bytes());
-        let digest = mac.finalize().into_bytes();
-        let mut hex = String::with_capacity(32);
-        for byte in &digest[..16] {
-            hex.push_str(&format!("{byte:02x}"));
-        }
-        format!("{HMAC_PREFIX}{hex}")
+        self.0.marker_raw(canonical(value).as_bytes())
     }
 }
 
@@ -107,38 +79,25 @@ fn canonical(value: &Value) -> String {
     serde_json::to_string(value).expect("a JSON value serializes")
 }
 
-#[derive(Clone, Copy)]
-enum Namespace {
-    Key,
-    Cell,
-}
-
+/// Marks for one report: keyed markers when there is a key, ordinal refs otherwise.
 struct Marker<'a> {
     key: Option<&'a RedactionKey>,
-    keys: BTreeMap<String, usize>,
-    cells: BTreeMap<String, usize>,
+    ordinals: redact::Marker<'static>,
 }
 
 impl<'a> Marker<'a> {
     fn new(key: Option<&'a RedactionKey>) -> Self {
         Self {
             key,
-            keys: BTreeMap::new(),
-            cells: BTreeMap::new(),
+            ordinals: redact::Marker::ordinal(),
         }
     }
 
     fn mark(&mut self, namespace: Namespace, value: &Value) -> Value {
-        if let Some(key) = self.key {
-            return Value::String(key.marker(value));
-        }
-        let (table, letter) = match namespace {
-            Namespace::Key => (&mut self.keys, 'k'),
-            Namespace::Cell => (&mut self.cells, 'v'),
-        };
-        let next = table.len() + 1;
-        let ordinal = *table.entry(canonical(value)).or_insert(next);
-        Value::String(format!("{REF_PREFIX}{letter}{ordinal}"))
+        Value::String(match self.key {
+            Some(key) => key.marker(value),
+            None => self.ordinals.mark(namespace, canonical(value).as_bytes()),
+        })
     }
 }
 
@@ -167,11 +126,11 @@ pub fn redact_report(
             for entry in &mut result.affected[range] {
                 if let Some(entry_key) = entry.key.as_mut() {
                     for value in entry_key.values_mut() {
-                        *value = marker.mark(Namespace::Key, value);
+                        *value = marker.mark(Namespace::ROW, value);
                     }
                 }
                 if let Some(value) = entry.value.as_mut() {
-                    *value = marker.mark(Namespace::Cell, value);
+                    *value = marker.mark(Namespace::VALUE, value);
                 }
             }
         }
@@ -204,11 +163,11 @@ fn redact_key_objects(value: &mut Value, marker: &mut Marker<'_>) {
                     match child {
                         Value::Object(inner) => {
                             for leaf in inner.values_mut() {
-                                *leaf = marker.mark(Namespace::Key, leaf);
+                                *leaf = marker.mark(Namespace::ROW, leaf);
                             }
                         }
                         Value::Null => {}
-                        other => *other = marker.mark(Namespace::Key, other),
+                        other => *other = marker.mark(Namespace::ROW, other),
                     }
                 } else {
                     redact_key_objects(child, marker);
@@ -228,6 +187,7 @@ fn redact_key_objects(value: &mut Value, marker: &mut Marker<'_>) {
 mod tests {
     use std::collections::BTreeMap;
 
+    use cmdrvl_core::redact::{HMAC_PREFIX, REF_PREFIX};
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use verify_core::{

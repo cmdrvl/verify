@@ -13,8 +13,11 @@ name = "embedding_equivalence"
 path = "../../tests/embedding_equivalence.rs"
 
 [dependencies]
-blake3 = "1.8"
+cmdrvl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
 verify-core = { path = "../verify-core" }
+
+[dev-dependencies]
+# Tests compute expected digests without going through cmdrvl-core.
+blake3 = "1.8"

@@ -17,6 +17,11 @@ repository = "https://github.com/cmdrvl/verify"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+# Shared hashing and redaction. Pinned by exact rev, the same as the other tools.
+# default-features = false: the one default turns on serde_json/float_roundtrip, which this
+# workspace already sets itself below. Do NOT use `cmdrvl_core::lockfile` at this rev: its
+# matching accepts inputs that released tools refuse.
+cmdrvl-core = { git = "https://github.com/cmdrvl/core", rev = "a3dad0b1af2eeb8036625b25f3d9ff94c3a1ef0e", default-features = false }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: a number's text is read as the nearest f64. The default parser can be one
 # step off, so a rule literal did not equal the same text in the data.

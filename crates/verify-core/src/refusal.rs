@@ -1,3 +1,7 @@
+//! `verify.report.v1` refusals. They stay local on purpose (cmd-zjr):
+//! `cmdrvl_core::refusal` has a different shape (`next_command`, its own envelope), so using
+//! it would change report output.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
