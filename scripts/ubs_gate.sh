@@ -81,6 +81,8 @@ set -e
 if [ "$ubs_exit" -ne 0 ]; then
   echo "UBS gate failed: scanner exited with code $ubs_exit." >&2
   if [ -s "$log_file" ]; then
+    # The tail alone is the summary; show what the critical findings are.
+    grep -A12 'CRITICAL (' "$log_file" >&2 || true
     tail -n 40 "$log_file" >&2
   fi
   exit "$ubs_exit"
