@@ -345,7 +345,7 @@ impl Document<'_> {
 /// What precedes the digits.
 #[derive(Default)]
 struct Prefix {
-    /// Where the currency, sign and parenthesis before the digits begin.
+    /// Where the currency, sign and parenthesis in front of the digits start.
     start: usize,
     currencies: Vec<Currency>,
     negative_at: Option<usize>,
