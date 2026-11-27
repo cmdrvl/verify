@@ -428,10 +428,25 @@ When a failing rule has many localized rows, `--sample-affected <N>` limits the 
 `verify ground` checks citations against raw source-document bytes that are pinned by a required, repeatable `--lock` (`lock.v0`) argument. The claims input is JSONL; each line requires `claim_id`, `source`, and `quote`, with an optional half-open raw byte span and optional numeric `value`, `unit`, and `scale`:
 
 ```json
-{"claim_id":"loan-amount","source":"filing","quote":"95000000.00000000","byte_span":{"start":123,"end":140},"value":95,"unit":"USD","scale":"millions"}
+{"claim_id":"loan-amount","source":"filing","quote":"95000000.00000000","byte_span":{"start":123,"end":140},"value":95,"scale":"millions"}
 ```
 
-The pure-Rust engine drops HTML tags and comments, drops `script` and `style` contents, decodes `amp`, `lt`, `gt`, `quot`, `apos`, `nbsp`, and valid numeric character references, then trims and collapses Unicode whitespace to one ASCII space. A supplied raw span is mapped through that normalization; without `byte_span`, exactly one normalized visible match is required. Zero matches is `E_QUOTE_NOT_FOUND`; multiple matches refuse with `E_BAD_AUTHORING` and detail code `E_QUOTE_AMBIGUOUS` plus `match_count`, never guessing a location. Text inside tags, comments, scripts, and styles is not searchable. Numeric surfaces use exact decimal arithmetic for `units`, `thousands`, `millions`, `percent`, and `bps`; a wrong scale is a deterministic `E_SCALE_MISMATCH` result. The command reuses `verify.report.v1` and the existing redaction: failing quote/value details are ordinal refs by default and raw only with `--explicit`.
+> The rules below are stricter than released 0.7.6, which passes many unsupported claims, including a quote that cuts a word or number and a unit the document never states. They apply from the first release that includes them.
+
+**Text.** The pure-Rust engine drops HTML tags and comments and the contents of `script` and `style`, decodes common named entities and numeric character references, removes soft hyphens and zero-width characters, and collapses whitespace to one space. Styling tags (`span`, `b`, `i`, `font`, `a`, inline XBRL and the like) join the text around them; every other tag, including table cells, `br`, `sup` and XML elements, separates it. A `<` that does not start a tag name is ordinary text.
+
+**Quotes.** A quote must stand on its own: it may not start or end inside a word (including hyphenated words and contractions) or inside a number, and may not leave out a sign, parenthesis, scale word or percent sign that belongs to a number it quotes. Without `byte_span`, exactly one such match is required. Zero is `E_QUOTE_NOT_FOUND`; several refuse with `E_BAD_AUTHORING` and detail code `E_QUOTE_AMBIGUOUS` plus `match_count`. A `byte_span` is held to the same rules, and the bytes in it must read on their own as they do in the document.
+
+**Numbers.** A numeric claim passes only when all of these hold:
+
+- The quote contains exactly one number. Digits that are part of a name (`Q3`, `10-K`, `10-year`, `3.5x`) do not count. No number is `E_NUMBER_NOT_IN_SPAN`; several, including a date beside an amount, is `E_NUMBER_UNBOUND`. Quote less text.
+- Its value, sign and scale can be read from the document around it, not just from the quote. Otherwise it is `E_NUMBER_UNBOUND`. This covers, among others: parentheses; a spaced or ambiguous dash; billions, `bn`, `MM`, `mil` and other magnitudes that no claim scale expresses; a lone `M` (`$8M`: thousands to some writers, millions to others), `B`, or `k` without a currency; ranges, lists that share a scale, dates, ratios and fractions; unusual digit grouping; a footnote or exponent beside the digits; a scale in another HTML element; and, for a number with no scale of its own, any document that declares one ("in thousands", "US$'000").
+- The value matches in exact decimal arithmetic, and a percentage or basis-point figure is claimed as `percent` or `bps` (a plain quantity is not). Otherwise `E_SCALE_MISMATCH`.
+- If the claim has a `unit`, the document states that unit on the number itself: otherwise `E_UNIT_NOT_ESTABLISHED`. A currency code or `US$` establishes `USD`; `€`, `£`, `₹` and the currency names next to a number establish theirs. **A bare `$` does not establish `USD`** (or any other dollar): claim `"unit":"$"` for it. `¥` works the same way. Besides currencies, only `percent`/`%` and `bps` can be established; other units, such as `shares`, do not pass.
+
+**What PASS does not show.** It does not read meaning: "not", "up to" or "more than" outside the quote are not checked, so quote enough text to carry them. Text hidden by CSS is still searched. A quote may run across adjacent table cells or blocks. In a plain-text file, anything shaped like a tag is removed. Scale words are recognised in English and a few other forms only. Text written without spaces between words, such as Chinese or Japanese, can only be quoted in whole runs.
+
+The command reuses `verify.report.v1` and the existing redaction: failing quote and value details are ordinal refs by default and raw only with `--explicit`.
 
 ### Redaction (`--explicit`)
 

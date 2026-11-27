@@ -17,6 +17,10 @@ use verify_core::{
     },
 };
 
+mod numbers;
+
+use numbers::{Currency, NumberToken, TagBreak};
+
 pub const GROUNDING_CONSTRAINT_SET: &str = "grounding.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,7 +616,7 @@ pub fn evaluate(
         if let Some(numeric) = &claim.numeric {
             report
                 .results
-                .push(numeric_result(claim, numeric, &resolution.normalized_text));
+                .push(numeric_result(claim, numeric, &resolution.numbers));
         }
     }
 
@@ -636,6 +640,7 @@ struct RawSpan {
 struct NormalizedText {
     text: String,
     origins: Vec<RawSpan>,
+    breaks: Vec<TagBreak>,
 }
 
 impl NormalizedText {
@@ -652,12 +657,6 @@ impl NormalizedText {
             end: last.end,
         })
     }
-
-    fn overlaps_raw_span(&self, span: &ByteSpan) -> bool {
-        self.origins
-            .iter()
-            .any(|origin| origin.start < span.end && span.start < origin.end)
-    }
 }
 
 #[derive(Debug, Default)]
@@ -665,10 +664,22 @@ struct NormalizedBuilder {
     text: String,
     origins: Vec<RawSpan>,
     pending_whitespace: Option<RawSpan>,
+    breaks: Vec<TagBreak>,
+    /// A separating tag is part of the pending whitespace; `true` if it was `sup` or `sub`.
+    pending_break: Option<bool>,
 }
 
 impl NormalizedBuilder {
+    /// A tag (or a skipped element) that separates the text on either side of it.
+    fn separate(&mut self, origin: RawSpan, raised: bool) {
+        self.push(' ', origin);
+        self.pending_break = Some(raised || self.pending_break == Some(true));
+    }
+
     fn push(&mut self, character: char, origin: RawSpan) {
+        if is_invisible(character) {
+            return;
+        }
         if character.is_whitespace() {
             self.pending_whitespace = Some(match self.pending_whitespace {
                 Some(previous) => RawSpan {
@@ -680,9 +691,16 @@ impl NormalizedBuilder {
             return;
         }
 
+        let separated = self.pending_break.take();
         if let Some(origin) = self.pending_whitespace.take()
             && !self.text.is_empty()
         {
+            if let Some(raised) = separated {
+                self.breaks.push(TagBreak {
+                    offset: self.text.len(),
+                    raised,
+                });
+            }
             self.text.push(' ');
             self.origins.push(origin);
         }
@@ -694,6 +712,7 @@ impl NormalizedBuilder {
         NormalizedText {
             text: self.text,
             origins: self.origins,
+            breaks: self.breaks,
         }
     }
 }
@@ -701,8 +720,79 @@ impl NormalizedBuilder {
 #[derive(Debug, Clone)]
 struct QuoteResolution {
     raw_span: Option<ByteSpan>,
-    normalized_text: String,
+    /// The numbers inside the matched text; empty when the quote did not match.
+    numbers: Vec<QuotedNumber>,
     failure: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct QuotedNumber {
+    token: NumberToken,
+    surface: String,
+}
+
+fn quoted_numbers(
+    text: &str,
+    tokens: &[NumberToken],
+    start: usize,
+    end: usize,
+) -> Vec<QuotedNumber> {
+    tokens
+        .iter()
+        .filter(|token| !token.identifier && start <= token.start && token.end <= end)
+        .map(|token| QuotedNumber {
+            token: token.clone(),
+            surface: token.surface(text, start, end).to_owned(),
+        })
+        .collect()
+}
+
+/// The part of the visible document that `span` covers, as a byte range of the normalized
+/// text. `None` if the span covers no visible text or cuts a character reference.
+fn span_projection(document: &NormalizedText, span: &ByteSpan) -> Option<(usize, usize)> {
+    let mut covered: Vec<(usize, char, RawSpan)> = document
+        .text
+        .char_indices()
+        .zip(&document.origins)
+        .filter(|(_, origin)| origin.start < span.end && span.start < origin.end)
+        .map(|((offset, character), origin)| (offset, character, *origin))
+        .collect();
+    while covered
+        .last()
+        .is_some_and(|(_, character, _)| *character == ' ')
+    {
+        covered.pop();
+    }
+    let leading = covered
+        .iter()
+        .take_while(|(_, character, _)| *character == ' ')
+        .count();
+    covered.drain(..leading);
+    let inside = covered
+        .iter()
+        .all(|(_, _, origin)| span.start <= origin.start && origin.end <= span.end);
+    let (first, ..) = covered.first()?;
+    let (last, character, _) = covered.last()?;
+    inside.then(|| (*first, last + character.len_utf8()))
+}
+
+/// A quote may repeat the document's raw markup only if the markup holds nothing that is not
+/// visible text: no comment, script, style or attribute.
+fn is_plain_markup(quote: &str) -> bool {
+    quote.match_indices('<').all(|(start, _)| {
+        if !opens_markup(quote, start) {
+            return true;
+        }
+        let Some(end) = find_tag_end(quote, start) else {
+            return false;
+        };
+        let inner = quote[start + 1..end - 1].trim_matches('/').trim();
+        let name = inner.to_ascii_lowercase();
+        !inner.starts_with(['!', '?'])
+            && !inner.contains(|character: char| character.is_whitespace() || character == '=')
+            && name != "script"
+            && name != "style"
+    })
 }
 
 fn resolve_quote(
@@ -711,6 +801,10 @@ fn resolve_quote(
 ) -> Result<QuoteResolution, GroundingError> {
     let target = normalize_whitespace(&claim.quote);
     let normalized_document = normalize_html(&document.bytes);
+    let tokens = normalized_document
+        .as_ref()
+        .map(|document| numbers::tokens(&document.text, &document.breaks))
+        .unwrap_or_default();
 
     if let Some(span) = &claim.byte_span {
         if span.start > span.end || span.end > document.bytes.len() {
@@ -725,36 +819,35 @@ fn resolve_quote(
             });
         }
         let raw = &document.bytes[span.start..span.end];
-        let normalized_span = normalize_html(raw);
-        let html_match = normalized_span.as_ref().is_some_and(|normalized| {
-            normalized.text == target
-                && normalized_document
-                    .as_ref()
-                    .is_some_and(|document| document.overlaps_raw_span(span))
+        // The span must read the same on its own as it does where it sits in the document,
+        // so it cannot start inside a comment, script or tag and borrow hidden text.
+        let matched = normalized_document.as_ref().and_then(|document| {
+            let (start, end) = span_projection(document, span)?;
+            let visible = &document.text[start..end];
+            let reads_alone = normalize_html(raw).is_some_and(|alone| alone.text == visible);
+            let quoted = visible == target
+                || (raw == claim.quote.as_bytes() && is_plain_markup(&claim.quote));
+            (!target.is_empty()
+                && reads_alone
+                && quoted
+                && numbers::stands_alone(&document.text, &tokens, start, end))
+            .then(|| quoted_numbers(&document.text, &tokens, start, end))
         });
-        let exact_match = raw == claim.quote.as_bytes()
-            && normalized_document
-                .as_ref()
-                .is_some_and(|document| document.overlaps_raw_span(span));
-        if html_match || exact_match {
+        if let Some(numbers) = matched {
             return Ok(QuoteResolution {
                 raw_span: Some(span.clone()),
-                normalized_text: normalized_span
-                    .map(|normalized| normalized.text)
-                    .unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
+                numbers,
                 failure: None,
             });
         }
 
-        let failure = normalized_document
+        let elsewhere = normalized_document
             .as_ref()
-            .is_some_and(|document| !normalized_matches(document, &target).is_empty());
+            .is_some_and(|document| !normalized_matches(document, &tokens, &target).is_empty());
         return Ok(QuoteResolution {
             raw_span: Some(span.clone()),
-            normalized_text: normalized_span
-                .map(|normalized| normalized.text)
-                .unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
-            failure: Some(if failure {
+            numbers: Vec::new(),
+            failure: Some(if elsewhere {
                 "E_SPAN_MISMATCH"
             } else {
                 "E_QUOTE_NOT_FOUND"
@@ -762,23 +855,20 @@ fn resolve_quote(
         });
     }
 
-    let Some(normalized_document) = normalized_document else {
-        return Ok(QuoteResolution {
-            raw_span: None,
-            normalized_text: String::new(),
-            failure: Some("E_QUOTE_NOT_FOUND"),
-        });
+    let not_found = || QuoteResolution {
+        raw_span: None,
+        numbers: Vec::new(),
+        failure: Some("E_QUOTE_NOT_FOUND"),
     };
-    let matches = normalized_matches(&normalized_document, &target);
+    let Some(normalized_document) = normalized_document else {
+        return Ok(not_found());
+    };
+    let matches = normalized_matches(&normalized_document, &tokens, &target);
     match matches.as_slice() {
-        [] => Ok(QuoteResolution {
-            raw_span: None,
-            normalized_text: String::new(),
-            failure: Some("E_QUOTE_NOT_FOUND"),
-        }),
+        [] => Ok(not_found()),
         [(start, end)] => Ok(QuoteResolution {
             raw_span: normalized_document.raw_span_for_match(*start, *end),
-            normalized_text: normalized_document.text[*start..*end].to_owned(),
+            numbers: quoted_numbers(&normalized_document.text, &tokens, *start, *end),
             failure: None,
         }),
         _ => Err(GroundingError::AmbiguousQuote {
@@ -832,18 +922,41 @@ fn quote_result(
     }
 }
 
-fn normalized_matches(document: &NormalizedText, target: &str) -> Vec<(usize, usize)> {
-    document
-        .text
-        .match_indices(target)
-        .map(|(start, value)| (start, start + value.len()))
-        .collect()
+/// Every place `target` stands in the document as whole words and whole numbers.
+fn normalized_matches(
+    document: &NormalizedText,
+    tokens: &[NumberToken],
+    target: &str,
+) -> Vec<(usize, usize)> {
+    let mut matches = Vec::new();
+    let Some(first) = target.chars().next() else {
+        return matches;
+    };
+    let mut from = 0;
+    while let Some(relative) = document.text[from..].find(target) {
+        let start = from + relative;
+        let end = start + target.len();
+        if numbers::stands_alone(&document.text, tokens, start, end) {
+            matches.push((start, end));
+        }
+        // Occurrences may overlap, and a rejected one must not hide the next.
+        from = start + first.len_utf8();
+    }
+    matches
+}
+
+/// Characters that do not show: they must not split or hide a word.
+fn is_invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{ad}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+    )
 }
 
 fn normalize_whitespace(value: &str) -> String {
     let mut normalized = String::new();
     let mut pending_space = false;
-    for character in value.chars() {
+    for character in value.chars().filter(|character| !is_invisible(*character)) {
         if character.is_whitespace() {
             pending_space = true;
         } else {
@@ -876,12 +989,20 @@ fn normalize_html(bytes: &[u8]) -> Option<NormalizedText> {
             } else {
                 "style"
             };
-            index = skip_element(source, index, name);
+            let end = skip_element(source, index, name);
+            builder.separate(RawSpan { start: index, end }, false);
+            index = end;
             continue;
         }
         if remaining.as_bytes().first() == Some(&b'<')
+            && opens_markup(source, index)
             && let Some(end) = find_tag_end(source, index)
         {
+            let name = tag_name(&source[index..end]);
+            if !INLINE_TAGS.contains(&name.as_str()) {
+                let raised = name == "sup" || name == "sub";
+                builder.separate(RawSpan { start: index, end }, raised);
+            }
             index = end;
             continue;
         }
@@ -900,9 +1021,50 @@ fn normalize_html(bytes: &[u8]) -> Option<NormalizedText> {
     Some(builder.finish())
 }
 
+/// A `<` starts markup only before a name, `/`, `!` or `?`; in "debt < 5" it is text.
+fn opens_markup(source: &str, index: usize) -> bool {
+    source[index + 1..]
+        .chars()
+        .next()
+        .is_some_and(|next| next.is_alphabetic() || matches!(next, '/' | '!' | '?'))
+}
+
+/// Tags that style text without separating it, so `<b>Rev</b>enue` stays one word. Every
+/// other tag, including `sup`, `sub`, `br`, table cells and XML elements, separates.
+const INLINE_TAGS: [&str; 19] = [
+    "a",
+    "abbr",
+    "b",
+    "big",
+    "del",
+    "em",
+    "font",
+    "i",
+    "ins",
+    "mark",
+    "nobr",
+    "s",
+    "small",
+    "span",
+    "strike",
+    "strong",
+    "u",
+    "ix:nonfraction",
+    "ix:nonnumeric",
+];
+
+/// The lower-cased element name of `<name ...>` or `</name>`.
+fn tag_name(tag: &str) -> String {
+    tag.trim_start_matches(['<', '/'])
+        .chars()
+        .take_while(|character| !character.is_whitespace() && !matches!(character, '>' | '/'))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 fn starts_element(source: &str, index: usize, name: &str) -> bool {
     let prefix = format!("<{name}");
-    if !source.as_bytes()[index..].starts_with(prefix.as_bytes()) {
+    if !starts_ignoring_case(&source.as_bytes()[index..], &prefix) {
         return false;
     }
     source[index + prefix.len()..]
@@ -947,7 +1109,13 @@ fn find_ascii_case_insensitive(source: &str, needle: &str) -> Option<usize> {
     source
         .char_indices()
         .map(|(index, _)| index)
-        .find(|index| source.as_bytes()[*index..].starts_with(needle.as_bytes()))
+        .find(|index| starts_ignoring_case(&source.as_bytes()[*index..], needle))
+}
+
+fn starts_ignoring_case(bytes: &[u8], prefix: &str) -> bool {
+    bytes
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 fn decode_entity(source: &str, start: usize) -> Option<(char, usize)> {
@@ -964,6 +1132,24 @@ fn decode_entity(source: &str, start: usize) -> Option<(char, usize)> {
         "quot" => '"',
         "apos" => '\'',
         "nbsp" => '\u{00a0}',
+        "thinsp" => '\u{2009}',
+        "ensp" => '\u{2002}',
+        "emsp" => '\u{2003}',
+        "shy" => '\u{00ad}',
+        "zwnj" => '\u{200c}',
+        "zwj" => '\u{200d}',
+        "hyphen" => '\u{2010}',
+        "minus" => '\u{2212}',
+        "ndash" => '\u{2013}',
+        "mdash" => '\u{2014}',
+        "lsquo" => '\u{2018}',
+        "rsquo" => '\u{2019}',
+        "ldquo" => '\u{201c}',
+        "rdquo" => '\u{201d}',
+        "euro" => '\u{20ac}',
+        "pound" => '\u{00a3}',
+        "yen" => '\u{00a5}',
+        "cent" => '\u{00a2}',
         _ if entity.starts_with("#x") || entity.starts_with("#X") => {
             char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)?
         }
@@ -973,25 +1159,12 @@ fn decode_entity(source: &str, start: usize) -> Option<(char, usize)> {
     Some((character, start + 1 + end + 1))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NumericSurface {
-    value: Decimal,
-    scale: Scale,
-    raw: String,
-}
-
-fn numeric_result(claim: &GroundingClaim, numeric: &NumericClaim, text: &str) -> RuleResult {
-    let surfaces = numeric_surfaces(text);
-    let matching = surfaces
-        .iter()
-        .any(|surface| surface.scale.apply(surface.value) == Some(numeric.target));
-    let code = if matching {
-        None
-    } else if surfaces.is_empty() {
-        Some("E_NUMBER_NOT_IN_SPAN")
-    } else {
-        Some("E_SCALE_MISMATCH")
-    };
+fn numeric_result(
+    claim: &GroundingClaim,
+    numeric: &NumericClaim,
+    numbers: &[QuotedNumber],
+) -> RuleResult {
+    let code = numeric_failure(numeric, numbers);
     let (rule_id, affected) = match code {
         None => (format!("grounding.{}.numeric", claim.claim_id), Vec::new()),
         Some(code) => (
@@ -1008,7 +1181,7 @@ fn numeric_result(claim: &GroundingClaim, numeric: &NumericClaim, text: &str) ->
                     "value": numeric.value,
                     "scale": numeric.scale.name(),
                     "unit": numeric.unit,
-                    "surfaces": surfaces.iter().map(|surface| &surface.raw).collect::<Vec<_>>(),
+                    "surfaces": numbers.iter().map(|number| &number.surface).collect::<Vec<_>>(),
                 })),
             }],
         ),
@@ -1026,85 +1199,59 @@ fn numeric_result(claim: &GroundingClaim, numeric: &NumericClaim, text: &str) ->
     }
 }
 
-fn numeric_surfaces(text: &str) -> Vec<NumericSurface> {
-    let bytes = text.as_bytes();
-    let mut surfaces = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let starts_number = bytes[index].is_ascii_digit()
-            || (matches!(bytes[index], b'+' | b'-')
-                && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
-            || (bytes[index] == b'.' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
-            || (matches!(bytes[index], b'$' | 0xC2)
-                && bytes.get(index + 1).is_some_and(u8::is_ascii_digit));
-        if !starts_number {
-            index += 1;
-            continue;
+/// Whether the document itself states `claimed` as the unit of this number. A bare `$`
+/// never establishes a named dollar: it may only accompany a marker that does.
+fn unit_established(claimed: &str, scale: Scale, currencies: &[Currency]) -> bool {
+    let claimed = claimed.trim().to_ascii_lowercase();
+    let all_are = |wanted: Currency| {
+        !currencies.is_empty() && currencies.iter().all(|found| *found == wanted)
+    };
+    let code = match claimed.as_str() {
+        "%" | "percent" => return scale == Scale::Percent && currencies.is_empty(),
+        "bps" | "bp" | "basis_points" | "basis points" => {
+            return scale == Scale::Bps && currencies.is_empty();
         }
+        "$" => return all_are(Currency::Dollar),
+        "\u{a5}" => return all_are(Currency::Yen),
+        "us$" => "USD".to_owned(),
+        "c$" | "ca$" => "CAD".to_owned(),
+        "a$" | "au$" => "AUD".to_owned(),
+        "hk$" => "HKD".to_owned(),
+        "\u{20ac}" => "EUR".to_owned(),
+        "\u{a3}" => "GBP".to_owned(),
+        "\u{20b9}" => "INR".to_owned(),
+        other => other.to_ascii_uppercase(),
+    };
+    let dollar = matches!(code.as_str(), "USD" | "CAD" | "AUD" | "HKD" | "NZD" | "SGD");
+    let named = |found: &Currency| matches!(found, Currency::Code(name) if *name == code);
+    currencies.iter().any(named)
+        && currencies
+            .iter()
+            .all(|found| named(found) || (dollar && *found == Currency::Dollar))
+}
 
-        let start = index;
-        if matches!(bytes[index], b'$' | 0xC2) {
-            index += 1;
-        }
-        if bytes
-            .get(index)
-            .is_some_and(|byte| matches!(byte, b'+' | b'-'))
-        {
-            index += 1;
-        }
-        let number_start = index;
-        let mut dots = 0;
-        while index < bytes.len()
-            && (bytes[index].is_ascii_digit() || bytes[index] == b',' || bytes[index] == b'.')
-        {
-            if bytes[index] == b'.' {
-                dots += 1;
-            }
-            index += 1;
-        }
-        if number_start == index || dots > 1 {
-            index = start + 1;
-            continue;
-        }
-        let number_end = index;
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            index += 1;
-        }
-
-        let (scale, end) = if bytes.get(index) == Some(&b'%') {
-            (Scale::Percent, index + 1)
-        } else {
-            let suffix_start = index;
-            while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
-                index += 1;
-            }
-            let suffix = &text[suffix_start..index];
-            let scale = Scale::parse(suffix).or_else(|| {
-                if suffix.eq_ignore_ascii_case("basis") {
-                    let mut after_basis = index;
-                    while after_basis < bytes.len() && bytes[after_basis].is_ascii_whitespace() {
-                        after_basis += 1;
-                    }
-                    if text[after_basis..]
-                        .to_ascii_lowercase()
-                        .starts_with("points")
-                    {
-                        return Some(Scale::Bps);
-                    }
-                }
-                None
-            });
-            (scale.unwrap_or(Scale::Units), index)
-        };
-        let raw_end = end.max(number_end);
-        let raw = text.get(start..raw_end).unwrap_or_default().to_owned();
-        let number = text.get(start..number_end).unwrap_or_default();
-        if let Some(value) = Decimal::parse(number) {
-            surfaces.push(NumericSurface { value, scale, raw });
-        }
-        index = raw_end.max(start + 1);
+/// Why this claim does not hold for the numbers in its matched quote, or `None`.
+fn numeric_failure(numeric: &NumericClaim, numbers: &[QuotedNumber]) -> Option<&'static str> {
+    let number = match numbers {
+        [] => return Some("E_NUMBER_NOT_IN_SPAN"),
+        [number] => &number.token,
+        // Nothing says which of several numbers the claim is about.
+        _ => return Some("E_NUMBER_UNBOUND"),
+    };
+    let Some((value, scale)) = number.value else {
+        return Some("E_NUMBER_UNBOUND");
+    };
+    // A share (percent, bps) and a quantity are different claims, even when equal.
+    let is_share = |scale: Scale| matches!(scale, Scale::Percent | Scale::Bps);
+    if is_share(scale) != is_share(numeric.scale) || scale.apply(value) != Some(numeric.target) {
+        return Some("E_SCALE_MISMATCH");
     }
-    surfaces
+    match &numeric.unit {
+        Some(unit) if !unit_established(unit, scale, &number.currencies) => {
+            Some("E_UNIT_NOT_ESTABLISHED")
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

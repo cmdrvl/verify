@@ -81,6 +81,14 @@ fn report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("ground JSON report")
 }
 
+fn assert_unit_is_not_established(dir: &TempDir, document: &Path, lock: &Path, claim: &Value) {
+    let claims = claims_file(dir, "unstated-unit.jsonl", std::slice::from_ref(claim));
+    let output = run_ground(&claims, document, lock, false);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("E_UNIT_NOT_ESTABLISHED"), "{stdout}");
+}
+
 #[test]
 fn lock_is_required_for_grounding() {
     let output = Command::new(env!("CARGO_BIN_EXE_verify"))
@@ -128,12 +136,26 @@ fn real_fixture_passes_locked_quote_whitespace_and_numeric_scale_checks() {
                 "quote": "95000000.00000000",
                 "byte_span": {"start": number_start, "end": number_end},
                 "value": 95,
-                "scale": "millions",
-                "unit": "USD"
+                "scale": "millions"
             }),
         ],
     );
     let lock = lock_file(&dir, &document, sha256(&bytes));
+    // The XML states no currency, so claiming one does not pass (bd-w2p).
+    assert_unit_is_not_established(
+        &dir,
+        &document,
+        &lock,
+        &json!({
+            "claim_id": "unstated-unit",
+            "source": "filing",
+            "quote": "95000000.00000000",
+            "byte_span": {"start": number_start, "end": number_end},
+            "value": 95,
+            "scale": "millions",
+            "unit": "USD"
+        }),
+    );
 
     let first = run_ground(&claims, &document, &lock, false);
     assert_eq!(first.status.code(), Some(0));
@@ -275,12 +297,26 @@ fn real_sec_html_fixture_resolves_entities_tags_and_numeric_scale() {
                 "quote": "50,000,000.00",
                 "byte_span": {"start": amount_start, "end": amount_end},
                 "value": 50,
-                "unit": "USD",
                 "scale": "millions"
             }),
         ],
     );
     let lock = lock_file(&dir, &document, sha256(&bytes));
+    // The table cell is a bare amount, so claiming a currency does not pass (bd-w2p).
+    assert_unit_is_not_established(
+        &dir,
+        &document,
+        &lock,
+        &json!({
+            "claim_id": "unstated-unit",
+            "source": "filing",
+            "quote": "50,000,000.00",
+            "byte_span": {"start": amount_start, "end": amount_end},
+            "value": 50,
+            "unit": "USD",
+            "scale": "millions"
+        }),
+    );
 
     let output = run_ground(&claims, &document, &lock, false);
     assert_eq!(output.status.code(), Some(0));
