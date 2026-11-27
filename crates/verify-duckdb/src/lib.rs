@@ -2,6 +2,7 @@
 
 pub mod binding_predicates;
 pub mod bindings;
+pub mod fetch;
 pub mod lock_check;
 pub mod query_rules;
 pub mod scalar;
@@ -18,11 +19,12 @@ pub use bindings::{
     BatchBindingError, BatchBindingInput, BatchBindingLimits, BindingColumn, BindingFormat,
     BindingMetadata, BindingRegistry, LoadedBinding, SUPPORTED_EXTENSIONS, quote_identifier,
 };
+pub use fetch::{Cell, CellRows, WideDecimal, WideNested, query_cells};
 pub use lock_check::{LockError, verify_locks};
 pub use query_rules::{QueryRuleError, evaluate_query_rule, execute_query_rules};
 pub use scalar::{
-    DuckValueError, DuckValueErrorKind, duckdb_type_category, duckdb_type_is_temporal,
-    duckdb_value_to_protocol,
+    DuckValueError, DuckValueErrorKind, WIDE_DECIMAL_LIMIT, duckdb_cell_to_protocol,
+    duckdb_type_category, duckdb_type_is_temporal, duckdb_value_to_protocol,
 };
 
 pub struct BatchContext {

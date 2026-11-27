@@ -2,6 +2,8 @@ use duckdb::types::{TimeUnit, Value as DuckValue};
 use serde_json::{Number, Value};
 use verify_engine::scalar::ScalarCategory;
 
+use crate::fetch::Cell;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuckValueErrorKind {
     NonScalar,
@@ -21,7 +23,14 @@ impl DuckValueErrorKind {
 pub struct DuckValueError {
     pub kind: DuckValueErrorKind,
     pub value_type: String,
+    /// Set when the refusal comes from a limit that is meant to be lifted.
+    pub limit: Option<&'static str>,
 }
+
+/// Reported with the refusal of a DECIMAL beyond the limits that `f64` cannot
+/// hold without losing a digit.
+pub const WIDE_DECIMAL_LIMIT: &str = "interim limit (bd-1t5): a DECIMAL beyond 96 bits or scale 28 \
+is read only when no digit is lost";
 
 impl std::fmt::Display for DuckValueError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,7 +38,54 @@ impl std::fmt::Display for DuckValueError {
             formatter,
             "DuckDB {} value cannot be represented as a protocol scalar",
             self.value_type
-        )
+        )?;
+        match self.limit {
+            Some(limit) => write!(formatter, " ({limit})"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl DuckValueError {
+    /// A refusal detail, naming the limit when there is one.
+    pub(crate) fn in_detail(&self, mut detail: Value) -> Value {
+        if let (Some(limit), Value::Object(fields)) = (self.limit, &mut detail) {
+            fields.insert("limit".to_owned(), Value::String(limit.to_owned()));
+        }
+        detail
+    }
+}
+
+/// [`duckdb_value_to_protocol`] for a cell read by [`crate::query_cells`].
+pub fn duckdb_cell_to_protocol(cell: Cell) -> Result<Value, DuckValueError> {
+    match cell {
+        Cell::Value(value) => duckdb_value_to_protocol(value),
+        Cell::WideDecimal(decimal) => {
+            decimal
+                .lossless_number()
+                .map(Value::Number)
+                .ok_or_else(|| DuckValueError {
+                    limit: Some(WIDE_DECIMAL_LIMIT),
+                    ..unrepresentable("decimal")
+                })
+        }
+        Cell::WideNested(nested) => Err(non_scalar(nested.kind())),
+    }
+}
+
+/// [`duckdb_value_sort_key`] for a cell; nested values sort by kind alone.
+pub(crate) fn duckdb_cell_sort_key(cell: &Cell) -> String {
+    match cell {
+        Cell::Value(value) => duckdb_value_sort_key(value),
+        Cell::WideDecimal(decimal) => format!("02:number:{}", decimal.text()),
+        Cell::WideNested(nested) => match nested.kind() {
+            "struct" => "91:struct",
+            "array" => "92:array",
+            "map" => "93:map",
+            "union" => "94:union",
+            _ => "90:list",
+        }
+        .to_owned(),
     }
 }
 
@@ -285,6 +341,7 @@ fn non_scalar(value_type: &str) -> DuckValueError {
     DuckValueError {
         kind: DuckValueErrorKind::NonScalar,
         value_type: value_type.to_owned(),
+        limit: None,
     }
 }
 
@@ -292,6 +349,7 @@ fn unrepresentable(value_type: &str) -> DuckValueError {
     DuckValueError {
         kind: DuckValueErrorKind::Unrepresentable,
         value_type: value_type.to_owned(),
+        limit: None,
     }
 }
 

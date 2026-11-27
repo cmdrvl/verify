@@ -617,6 +617,31 @@ text in a rule and in loaded data is therefore the same number, and compiling
 then running agrees with the one-step path. This is correct rounding, not exact
 decimal arithmetic: distinct texts can still share one `f64`.
 
+#### DECIMAL values beyond 96 bits or scale 28
+
+This is an interim limit, to be lifted when numbers are compared exactly. It
+applies to a DECIMAL whose stored integer needs more than 96 bits or whose scale
+is above 28. A DECIMAL inside those bounds is read as described elsewhere here.
+So is a DECIMAL of scale 0, whatever its size: it is read as a wide integer, and
+the rules below do not cover it.
+
+- A rule that reads such a value (a portable rule, a key, or a binding-qualified
+  operand) reads it as a number only if no digit is lost: the shortest decimal
+  text a report prints for the nearest `f64` is the stored decimal. Where one
+  `f64` has two equally short texts, only the printed one counts, so a stored
+  value equal to the other is not read as a number. Otherwise the run refuses it
+  as an unrepresentable decimal, with the code that path already uses
+  (`E_SQL_ERROR`, `E_KEY_INVALID` or `E_BAD_EXPR`), and the refusal names the
+  interim limit. A rule literal is still read as the nearest `f64`.
+- A LIST, STRUCT, ARRAY, MAP or UNION holding such a value is non-scalar, as the
+  same column type is inside the bounds. NULL stays NULL.
+- In a `query_zero_rows` result, which no verdict depends on, such a scalar is a
+  number if no digit is lost and otherwise its exact decimal text as a string.
+- In a `query_zero_rows` result, a LIST, STRUCT, ARRAY, MAP or UNION holding such
+  a value is a string in the same layout as one inside the bounds, for example
+  `List([Decimal(0.500000000000000000000000000000)])`, keeping every digit of the
+  stored decimal. This is not DuckDB's own text. The query runs as written.
+
 #### Predicate scalar comparability
 
 Predicate comparisons are type-strict. Executors must not inherit coercion

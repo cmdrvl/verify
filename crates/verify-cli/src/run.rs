@@ -18,8 +18,8 @@ use verify_core::{
 };
 use verify_duckdb::{
     BatchBindingInput, BatchBindingLimits, BindingPredicateError, BindingRegistry,
-    duckdb_type_is_temporal, duckdb_value_to_protocol, evaluate_binding_predicate,
-    execute_query_rules, prepare_batch_context, quote_identifier, verify_locks,
+    duckdb_cell_to_protocol, duckdb_type_is_temporal, evaluate_binding_predicate,
+    execute_query_rules, prepare_batch_context, query_cells, quote_identifier, verify_locks,
 };
 use verify_engine::{Relation, SummaryEngine, portable_relation, portable_row};
 
@@ -690,14 +690,11 @@ fn materialize_relation(
         .join(", ");
     let query = format!("SELECT {selected} FROM {relation_name}");
     let mut statement = connection.prepare(&query).map_err(duck)?;
-    let mut duckdb_rows = statement.query([]).map_err(duck)?;
-
     let mut rows = Vec::new();
-    while let Some(row) = duckdb_rows.next().map_err(duck)? {
+    for cells in query_cells(&mut statement, []).map_err(duck)?.rows {
         let mut row_map = BTreeMap::new();
-        for (i, col_name) in column_names.iter().enumerate() {
-            let duck_value: duckdb::types::Value = row.get(i).map_err(duck)?;
-            let protocol_value = duckdb_value_to_protocol(duck_value).map_err(|error| {
+        for (col_name, cell) in column_names.iter().zip(cells) {
+            let protocol_value = duckdb_cell_to_protocol(cell).map_err(|error| {
                 MaterializeError::Unrepresentable {
                     column: col_name.clone(),
                     text: error.to_string(),

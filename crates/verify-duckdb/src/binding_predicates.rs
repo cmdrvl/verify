@@ -23,9 +23,10 @@ use verify_engine::scalar::{
 use crate::{
     BindingRegistry,
     bindings::quote_identifier,
+    fetch::{Cell, query_cells},
     scalar::{
         DuckScalarCategory, DuckTemporalKind, DuckValueError, DuckValueErrorKind,
-        duckdb_scalar_category, duckdb_value_sort_key, duckdb_value_to_protocol,
+        duckdb_cell_sort_key, duckdb_cell_to_protocol, duckdb_scalar_category,
     },
 };
 
@@ -597,21 +598,18 @@ fn load_binding_keys(
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| sql_error(rule, error))?;
-    let mut query = statement
-        .query([])
-        .map_err(|error| sql_error(rule, error))?;
+    let query = query_cells(&mut statement, []).map_err(|error| sql_error(rule, error))?;
     let mut valid = BTreeMap::<KeyTuple, (BTreeMap<String, Value>, usize)>::new();
     let mut issues = Vec::new();
 
-    while let Some(row) = query.next().map_err(|error| sql_error(rule, error))? {
+    for cells in query.rows {
         let mut raw_sort = Vec::with_capacity(key_fields.len());
         let mut tuple = Vec::with_capacity(key_fields.len());
         let mut key = BTreeMap::new();
         let mut row_error = None;
-        for (index, field) in key_fields.iter().enumerate() {
-            let raw: DuckValue = row.get(index).map_err(|error| sql_error(rule, error))?;
-            raw_sort.push(duckdb_value_sort_key(&raw));
-            match duckdb_value_to_protocol(raw) {
+        for (field, cell) in key_fields.iter().zip(cells) {
+            raw_sort.push(duckdb_cell_sort_key(&cell));
+            match duckdb_cell_to_protocol(cell) {
                 Ok(Value::Null) => {
                     row_error.get_or_insert_with(|| {
                         key_invalid(
@@ -652,14 +650,14 @@ fn load_binding_keys(
                     row_error.get_or_insert_with(|| {
                         key_invalid(
                             rule,
-                            json!({
+                            error.in_detail(json!({
                                 "rule_id": rule.id,
                                 "binding": binding_name,
                                 "key_fields": key_fields,
                                 "field": field,
                                 "value_type": error.value_type,
                                 "reason": error.kind.key_reason(),
-                            }),
+                            })),
                         )
                     });
                 }
@@ -1092,7 +1090,7 @@ impl JoinedRow {
             Ok(value) => Ok(value),
             Err(error) => Err(BindingPredicateError::BadExpression {
                 rule_id: rule.id.clone(),
-                detail: json!({
+                detail: error.in_detail(json!({
                     "rule_id": rule.id,
                     "reason": "unrepresentable_operand",
                     "binding": anchor_binding,
@@ -1100,7 +1098,7 @@ impl JoinedRow {
                     "operand_binding": column.binding,
                     "field": column.field,
                     "value_type": error.value_type,
-                }),
+                })),
             }),
         }
     }
@@ -1114,25 +1112,31 @@ fn load_joined_rows(
     let mut statement = connection
         .prepare(&plan.sql)
         .map_err(|error| sql_error(rule, error))?;
-    let mut query = statement
-        .query([])
-        .map_err(|error| sql_error(rule, error))?;
+    let query = query_cells(&mut statement, []).map_err(|error| sql_error(rule, error))?;
     let mut rows = Vec::new();
-    while let Some(row) = query.next().map_err(|error| sql_error(rule, error))? {
+    for cells in query.rows {
+        // The plan's SQL returns the key fields, the projections, then three
+        // columns for each native comparison.
+        let mut cells = cells.into_iter().enumerate();
+        let mut next_cell = || {
+            cells
+                .next()
+                .ok_or_else(|| sql_error(rule, duckdb::Error::QueryReturnedNoRows))
+        };
         let mut tuple = Vec::with_capacity(plan.anchor_key_fields.len());
         let mut key = BTreeMap::new();
-        for (index, field) in plan.anchor_key_fields.iter().enumerate() {
-            let raw: DuckValue = row.get(index).map_err(|error| sql_error(rule, error))?;
-            let value = duckdb_value_to_protocol(raw).map_err(|error| {
+        for field in &plan.anchor_key_fields {
+            let (_, cell) = next_cell()?;
+            let value = duckdb_cell_to_protocol(cell).map_err(|error| {
                 key_invalid(
                     rule,
-                    json!({
+                    error.in_detail(json!({
                         "rule_id": rule.id,
                         "binding": "anchor",
                         "field": field,
                         "value_type": error.value_type,
                         "reason": error.kind.key_reason(),
-                    }),
+                    })),
                 )
             })?;
             let part = key_part(&value).ok_or_else(|| {
@@ -1152,25 +1156,20 @@ fn load_joined_rows(
         }
 
         let mut values = BTreeMap::new();
-        for (offset, column) in plan.projections.iter().enumerate() {
-            let raw: DuckValue = row
-                .get(plan.anchor_key_fields.len() + offset)
-                .map_err(|error| sql_error(rule, error))?;
-            values.insert(column.clone(), duckdb_value_to_protocol(raw));
+        for column in &plan.projections {
+            let (_, cell) = next_cell()?;
+            values.insert(column.clone(), duckdb_cell_to_protocol(cell));
         }
-        let native_offset = plan.anchor_key_fields.len() + plan.projections.len();
         let mut native_comparisons = BTreeMap::new();
-        for (index, comparison) in plan.native_comparisons.iter().enumerate() {
-            let result_index = native_offset + index * 3;
-            let raw_result: DuckValue = row
-                .get(result_index)
-                .map_err(|error| sql_error(rule, error))?;
-            let raw_left_null: DuckValue = row
-                .get(result_index + 1)
-                .map_err(|error| sql_error(rule, error))?;
-            let raw_right_null: DuckValue = row
-                .get(result_index + 2)
-                .map_err(|error| sql_error(rule, error))?;
+        for comparison in &plan.native_comparisons {
+            // SQL comparisons and null tests: never a DECIMAL.
+            let mut next_native = || match next_cell()? {
+                (_, Cell::Value(value)) => Ok(value),
+                (index, _) => Err(sql_error(rule, duckdb::Error::InvalidColumnIndex(index))),
+            };
+            let raw_result = next_native()?;
+            let raw_left_null = next_native()?;
+            let raw_right_null = next_native()?;
             native_comparisons.insert(
                 comparison.key.clone(),
                 NativeComparisonValue {

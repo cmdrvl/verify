@@ -9,7 +9,10 @@ use verify_core::{
     report::{AffectedEntry, ResultStatus, RuleResult},
 };
 
-use crate::BindingRegistry;
+use crate::{
+    BindingRegistry,
+    fetch::{Cell, query_cells},
+};
 
 pub const QUERY_RULE_OP: &str = "query_zero_rows";
 
@@ -175,31 +178,15 @@ pub fn evaluate_query_rule(
     let mut statement = connection
         .prepare(query)
         .map_err(|error| sql_error(rule, error.to_string()))?;
-    let mut rows = statement
-        .query([])
-        .map_err(|error| sql_error(rule, error.to_string()))?;
-
-    let column_count = rows.as_ref().expect("rows ref").column_count();
-    let column_names: Vec<String> = (0..column_count)
-        .map(|index| {
-            rows.as_ref()
-                .expect("rows ref")
-                .column_name(index)
-                .map_or_else(|_| "?".to_owned(), |name| name.to_owned())
-        })
-        .collect();
+    // The user's statement is executed as written; only the reading differs.
+    let result =
+        query_cells(&mut statement, []).map_err(|error| sql_error(rule, error.to_string()))?;
 
     let mut affected = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| sql_error(rule, error.to_string()))?
-    {
+    for cells in result.rows {
         let mut values = BTreeMap::new();
-        for (index, name) in column_names.iter().enumerate() {
-            let duck_value: duckdb::types::Value = row
-                .get(index)
-                .map_err(|error| sql_error(rule, error.to_string()))?;
-            values.insert(name.clone(), duckdb_to_json(duck_value));
+        for (name, cell) in result.names.iter().zip(cells) {
+            values.insert(name.clone(), cell_to_json(cell));
         }
         affected.push(row_to_affected_entry(&values, default_binding));
     }
@@ -509,6 +496,18 @@ fn row_to_affected_entry(row: &BTreeMap<String, Value>, default_binding: &str) -
         key: if key.is_empty() { None } else { Some(key) },
         field,
         value,
+    }
+}
+
+/// A query result's value for the report; no verdict depends on it.
+fn cell_to_json(cell: Cell) -> Value {
+    match cell {
+        Cell::Value(value) => duckdb_to_json(value),
+        // A number if no digit is lost, otherwise its exact text, as a HugeInt is shown.
+        Cell::WideDecimal(decimal) => decimal
+            .lossless_number()
+            .map_or_else(|| Value::String(decimal.text()), Value::Number),
+        Cell::WideNested(nested) => Value::String(nested.debug_text()),
     }
 }
 
