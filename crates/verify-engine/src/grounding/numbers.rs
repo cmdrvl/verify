@@ -823,9 +823,9 @@ pub(super) fn tokens(text: &str, breaks: &[TagBreak]) -> Vec<NumberToken> {
     let mut index = 0;
     while index < document.chars.len() {
         if starts_number(&document, index) {
-            let token = read_number(&document, index);
-            index = token.core_end_index;
-            found.push(token);
+            let number = read_number(&document, index);
+            index = number.core_end_index;
+            found.push(number);
         } else {
             index += 1;
         }
