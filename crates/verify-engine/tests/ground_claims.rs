@@ -2435,6 +2435,67 @@ fn milliarde_and_milliarden_mark_a_long_scale_document() {
     ]);
 }
 
+/// The singulars of magnitude words that were listed only in another form (bd-4v0).
+#[test]
+fn a_singular_magnitude_word_does_not_leave_its_number_bound() {
+    assert_none_pass(&[
+        case(
+            "German Milliarde",
+            "Der Wert war 1 Milliarde.",
+            "1 Milliarde",
+            n("1", "units"),
+        ),
+        case(
+            "Milliarde with a currency",
+            "EUR 5 Milliarde",
+            "EUR 5 Milliarde",
+            u("5", "units", "EUR"),
+        ),
+        case(
+            "Milliarde left out of the quote",
+            "Der Wert war EUR 5 Milliarde.",
+            "EUR 5",
+            n("5", "units"),
+        ),
+        case(
+            "Milliarde beyond the currency",
+            "Der Wert war 5 EUR Milliarde.",
+            "5 EUR",
+            n("5", "units"),
+        ),
+        case(
+            "Milliarde in capitals",
+            "WERT: 1 MILLIARDE",
+            "1 MILLIARDE",
+            n("1", "units"),
+        ),
+        case(
+            "Spanish mill\u{f3}n",
+            "Fue 1 mill\u{f3}n.",
+            "1 mill\u{f3}n",
+            n("1", "units"),
+        ),
+        case(
+            "Portuguese milh\u{e3}o",
+            "Foi 1 milh\u{e3}o.",
+            "1 milh\u{e3}o",
+            n("1", "units"),
+        ),
+        case(
+            "Portuguese without the accent",
+            "Foi 1 milhao.",
+            "1 milhao",
+            n("1", "units"),
+        ),
+        case(
+            "thousandth",
+            "It moved 5 thousandth.",
+            "5 thousandth",
+            n("5", "units"),
+        ),
+    ]);
+}
+
 #[test]
 fn capitalized_billion_is_the_english_short_scale() {
     assert_all_pass(&[

@@ -86,7 +86,7 @@ const PHRASES: [(&str, Currency); 17] = [
 ];
 
 /// Words after a number that change its magnitude in a way no claim scale can express.
-const UNSUPPORTED_SCALES: [&str; 48] = [
+const UNSUPPORTED_SCALES: [&str; 53] = [
     // Magnitude words in other languages.
     "billones",
     "billon",
@@ -94,13 +94,17 @@ const UNSUPPORTED_SCALES: [&str; 48] = [
     "billionen",
     "millones",
     "millon",
+    "mill\u{f3}n",
     "millionen",
     "milliard",
     "milliards",
+    "milliarde",
     "milliarden",
     "miljoen",
     "milhoes",
     "milh\u{f5}es",
+    "milhao",
+    "milh\u{e3}o",
     "tausend",
     "mille",
     "quadrillion",
@@ -135,6 +139,7 @@ const UNSUPPORTED_SCALES: [&str; 48] = [
     "pps",
     "ppt",
     "ppts",
+    "thousandth",
     "thousandths",
 ];
 
