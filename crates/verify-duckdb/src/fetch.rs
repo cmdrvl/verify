@@ -72,7 +72,7 @@ impl WideDecimal {
 
 /// `(negative, significant digits, power of ten of the last digit)` of a decimal
 /// text, with or without an exponent. Zero has no sign and no digits.
-fn decimal_parts(text: &str) -> Option<(bool, String, i64)> {
+pub(crate) fn decimal_parts(text: &str) -> Option<(bool, String, i64)> {
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),

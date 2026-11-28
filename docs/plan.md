@@ -775,6 +775,10 @@ of every participating relation:
 - corresponding components compare with the same type-strict scalar equality
   contract as predicate `eq`; incompatible component categories refuse with
   `E_KEY_INVALID`, and no string/number/boolean coercion is permitted
+- numeric keys are told apart exactly as received, before any conversion to a
+  report value, by the number identity of `unique` above: integers and
+  `DECIMAL`s keep every stored digit, and a `FLOAT` or `DOUBLE` from 2^53 up
+  matches only another one
 - string keys compare exactly, without trimming, case folding, or collation
   changes
 - every key tuple must be unique within its binding; a duplicate makes lookup

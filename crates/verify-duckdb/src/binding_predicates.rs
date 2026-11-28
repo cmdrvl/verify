@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use duckdb::{Connection, params_from_iter, types::Value as DuckValue};
+use duckdb::{Connection, types::Value as DuckValue};
 use serde_json::{Map, Value, json};
 use verify_core::{
     CONSTRAINT_VERSION,
@@ -23,7 +23,7 @@ use verify_engine::scalar::{
 use crate::{
     BindingRegistry,
     bindings::quote_identifier,
-    fetch::{Cell, query_cells},
+    fetch::{Cell, decimal_parts, query_cells},
     scalar::{
         DuckScalarCategory, DuckTemporalKind, DuckValueError, DuckValueErrorKind,
         duckdb_cell_sort_key, duckdb_cell_to_protocol, duckdb_scalar_category,
@@ -236,16 +236,7 @@ pub fn evaluate_rule(
             let localized = localized_anchor_column(expression, anchor_binding);
             let (field, value) = match localized {
                 Some(column) => {
-                    let value = localized_affected_value(
-                        rule,
-                        connection,
-                        bindings,
-                        &keys,
-                        &fields,
-                        anchor_binding,
-                        &row,
-                        &column,
-                    )?;
+                    let value = localized_affected_value(rule, anchor_binding, &row, &column)?;
                     (Some(column.field.clone()), value)
                 }
                 None => (None, None),
@@ -386,15 +377,59 @@ struct KeyTuple(Vec<KeyPart>);
 #[derive(Debug, Clone)]
 enum KeyPart {
     Boolean(bool),
-    Number(f64),
+    /// `identity` alone decides equality. `approx` only keeps numbers in numeric order.
+    Number {
+        approx: f64,
+        identity: NumberIdentity,
+    },
     String(String),
+}
+
+/// A numeric key exactly as received: sign, significant digits and the power of ten of the
+/// last one, so `1`, `1.0` and `1.00` are one key and no two different numbers are.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NumberIdentity {
+    /// A FLOAT or DOUBLE from 2^53 up may be a rounded neighbour of an integer, so it is
+    /// only ever the same key as another such value (docs/plan.md, number identity).
+    rounded_float: bool,
+    negative: bool,
+    digits: String,
+    power: i64,
+}
+
+/// Below this magnitude every integer has its own `f64`.
+const EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
+
+/// How DuckDB held a numeric key, read before the protocol conversion can round it.
+enum NumberSource {
+    /// Every stored digit of a DECIMAL; its protocol number may be rounded.
+    Decimal(String),
+    Float,
+    /// An integer, whose protocol number is exact.
+    Other,
+}
+
+impl NumberSource {
+    fn of(cell: &Cell) -> Self {
+        match cell {
+            Cell::Value(DuckValue::Decimal(decimal)) => Self::Decimal(decimal.to_string()),
+            Cell::WideDecimal(decimal) => Self::Decimal(decimal.text()),
+            Cell::Value(DuckValue::Float(_) | DuckValue::Double(_)) => Self::Float,
+            Cell::Value(_) | Cell::WideNested(_) => Self::Other,
+        }
+    }
 }
 
 impl PartialEq for KeyPart {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Boolean(left), Self::Boolean(right)) => left == right,
-            (Self::Number(left), Self::Number(right)) => left == right,
+            (
+                Self::Number { identity: left, .. },
+                Self::Number {
+                    identity: right, ..
+                },
+            ) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
             _ => false,
         }
@@ -413,13 +448,22 @@ impl Ord for KeyPart {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::Boolean(left), Self::Boolean(right)) => left.cmp(right),
-            (Self::Number(left), Self::Number(right)) => {
-                normalized_number(*left).total_cmp(&normalized_number(*right))
-            }
+            (
+                Self::Number {
+                    approx: left_approx,
+                    identity: left,
+                },
+                Self::Number {
+                    approx: right_approx,
+                    identity: right,
+                },
+            ) => normalized_number(*left_approx)
+                .total_cmp(&normalized_number(*right_approx))
+                .then_with(|| left.cmp(right)),
             (Self::String(left), Self::String(right)) => left.cmp(right),
             (Self::Boolean(_), _) => Ordering::Less,
-            (Self::Number(_), Self::Boolean(_)) => Ordering::Greater,
-            (Self::Number(_), Self::String(_)) => Ordering::Less,
+            (Self::Number { .. }, Self::Boolean(_)) => Ordering::Greater,
+            (Self::Number { .. }, Self::String(_)) => Ordering::Less,
             (Self::String(_), _) => Ordering::Greater,
         }
     }
@@ -609,6 +653,7 @@ fn load_binding_keys(
         let mut row_error = None;
         for (field, cell) in key_fields.iter().zip(cells) {
             raw_sort.push(duckdb_cell_sort_key(&cell));
+            let source = NumberSource::of(&cell);
             match duckdb_cell_to_protocol(cell) {
                 Ok(Value::Null) => {
                     row_error.get_or_insert_with(|| {
@@ -625,7 +670,7 @@ fn load_binding_keys(
                         )
                     });
                 }
-                Ok(value) => match key_part(&value) {
+                Ok(value) => match key_part(&value, &source) {
                     Some(part) => {
                         tuple.push(part);
                         key.insert(field.clone(), value);
@@ -704,10 +749,27 @@ fn load_binding_keys(
     Ok((rows, issues))
 }
 
-fn key_part(value: &Value) -> Option<KeyPart> {
+fn key_part(value: &Value, source: &NumberSource) -> Option<KeyPart> {
     match value {
         Value::Bool(value) => Some(KeyPart::Boolean(*value)),
-        Value::Number(value) => value.as_f64().map(KeyPart::Number),
+        Value::Number(value) => {
+            let approx = value.as_f64()?;
+            let text = match source {
+                NumberSource::Decimal(text) => text.clone(),
+                NumberSource::Float | NumberSource::Other => value.to_string(),
+            };
+            let (negative, digits, power) = decimal_parts(&text)?;
+            Some(KeyPart::Number {
+                approx,
+                identity: NumberIdentity {
+                    rounded_float: matches!(source, NumberSource::Float)
+                        && approx.abs() >= EXACT_INTEGER_LIMIT,
+                    negative,
+                    digits,
+                    power,
+                },
+            })
+        }
         Value::String(value) => Some(KeyPart::String(value.clone())),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
@@ -777,6 +839,11 @@ struct QueryPlan {
     anchor_key_fields: Vec<String>,
     projections: Vec<ColumnId>,
     native_comparisons: Vec<NativeComparison>,
+    /// Anchor temporal columns, also selected as text for failure reports.
+    temporal_texts: Vec<ColumnId>,
+    /// The key fields of each joined binding, selected so every row's match can be checked.
+    participant_key_fields: Vec<Vec<String>>,
+    anchor_key_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -868,12 +935,24 @@ fn build_join_query(
         ));
     }
 
-    let mut sql = format!(
-        "SELECT {} FROM {} AS {}",
-        select.join(", "),
-        quote_identifier(anchor.relation_name()),
-        quote_identifier(anchor_alias)
-    );
+    let temporal_texts = projections
+        .iter()
+        .filter(|column| {
+            column.binding == analysis.anchor_binding
+                && field_temporal_kind(fields, column).is_some()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for (index, column) in temporal_texts.iter().enumerate() {
+        select.push(format!(
+            "CAST({} AS VARCHAR) AS {}",
+            comparison_column_sql(column, &aliases, rule)?,
+            quote_identifier(&format!("__verify_text_{index}"))
+        ));
+    }
+
+    let mut participant_key_fields = Vec::new();
+    let mut joins = String::new();
     for binding_name in analysis
         .participating_bindings
         .iter()
@@ -888,18 +967,32 @@ fn build_join_query(
         let alias = aliases
             .get(binding_name)
             .ok_or_else(|| missing_binding(rule, binding_name))?;
+        for (position, field) in participant.fields.iter().enumerate() {
+            select.push(format!(
+                "{} AS {}",
+                qualified_identifier(alias, field),
+                quote_identifier(&format!(
+                    "__verify_match_{}_{position}",
+                    participant_key_fields.len()
+                ))
+            ));
+        }
+        participant_key_fields.push(participant.fields.clone());
         let conditions = anchor_keys
             .fields
             .iter()
             .zip(&participant.fields)
             .enumerate()
-            .map(|(position, (left, right))| {
-                let left = qualified_identifier(anchor_alias, left);
-                let right = qualified_identifier(alias, right);
+            .map(|(position, (left_field, right_field))| {
+                let left = qualified_identifier(anchor_alias, left_field);
+                let right = qualified_identifier(alias, right_field);
                 match anchor_keys.categories[position] {
-                    ScalarCategory::Number => {
-                        format!("CAST({left} AS DOUBLE) = CAST({right} AS DOUBLE)")
-                    }
+                    ScalarCategory::Number => number_key_candidates(
+                        &left,
+                        anchor.column(left_field).map(|c| c.data_type.as_str()),
+                        &right,
+                        loaded.column(right_field).map(|c| c.data_type.as_str()),
+                    ),
                     ScalarCategory::String => {
                         format!("encode({left}) = encode({right})")
                     }
@@ -908,12 +1001,18 @@ fn build_join_query(
             })
             .collect::<Vec<_>>()
             .join(" AND ");
-        sql.push_str(&format!(
+        joins.push_str(&format!(
             " LEFT JOIN {} AS {} ON {conditions}",
             quote_identifier(loaded.relation_name()),
             quote_identifier(alias)
         ));
     }
+    let sql = format!(
+        "SELECT {} FROM {} AS {}{joins}",
+        select.join(", "),
+        quote_identifier(anchor.relation_name()),
+        quote_identifier(anchor_alias)
+    );
 
     debug_assert!(
         projections.iter().all(|column| fields.contains_key(column)),
@@ -924,7 +1023,44 @@ fn build_join_query(
         anchor_key_fields: anchor_keys.fields.clone(),
         projections,
         native_comparisons,
+        temporal_texts,
+        participant_key_fields,
+        anchor_key_count: anchor_keys.rows.len(),
     })
+}
+
+/// The SQL condition proposing numeric key matches. It must hold for every pair of equal
+/// keys and may also hold for neighbours: `load_joined_rows` keeps only exact matches.
+/// Integers, and two columns of one type, are compared without a cast that rounds.
+fn number_key_candidates(
+    left: &str,
+    left_type: Option<&str>,
+    right: &str,
+    right_type: Option<&str>,
+) -> String {
+    let is_integer = |data_type: Option<&str>| {
+        matches!(
+            data_type,
+            Some(
+                "TINYINT"
+                    | "SMALLINT"
+                    | "INTEGER"
+                    | "BIGINT"
+                    | "HUGEINT"
+                    | "UTINYINT"
+                    | "USMALLINT"
+                    | "UINTEGER"
+                    | "UBIGINT"
+            )
+        )
+    };
+    if is_integer(left_type) && is_integer(right_type) {
+        format!("CAST({left} AS HUGEINT) = CAST({right} AS HUGEINT)")
+    } else if left_type.is_some() && left_type == right_type {
+        format!("{left} = {right}")
+    } else {
+        format!("CAST({left} AS DOUBLE) = CAST({right} AS DOUBLE)")
+    }
 }
 
 fn collect_native_comparisons(
@@ -1065,6 +1201,7 @@ struct JoinedRow {
     key: BTreeMap<String, Value>,
     values: BTreeMap<ColumnId, Result<Value, DuckValueError>>,
     native_comparisons: BTreeMap<NativeComparisonKey, NativeComparisonValue>,
+    temporal_texts: BTreeMap<ColumnId, DuckValue>,
 }
 
 #[derive(Debug)]
@@ -1115,8 +1252,9 @@ fn load_joined_rows(
     let query = query_cells(&mut statement, []).map_err(|error| sql_error(rule, error))?;
     let mut rows = Vec::new();
     for cells in query.rows {
-        // The plan's SQL returns the key fields, the projections, then three
-        // columns for each native comparison.
+        // The plan's SQL returns the key fields, the projections, three columns
+        // for each native comparison, the temporal texts, then each joined
+        // binding's key fields.
         let mut cells = cells.into_iter().enumerate();
         let mut next_cell = || {
             cells
@@ -1127,6 +1265,7 @@ fn load_joined_rows(
         let mut key = BTreeMap::new();
         for field in &plan.anchor_key_fields {
             let (_, cell) = next_cell()?;
+            let source = NumberSource::of(&cell);
             let value = duckdb_cell_to_protocol(cell).map_err(|error| {
                 key_invalid(
                     rule,
@@ -1139,7 +1278,7 @@ fn load_joined_rows(
                     })),
                 )
             })?;
-            let part = key_part(&value).ok_or_else(|| {
+            let part = key_part(&value, &source).ok_or_else(|| {
                 key_invalid(
                     rule,
                     json!({
@@ -1180,24 +1319,63 @@ fn load_joined_rows(
                 },
             );
         }
+        let mut temporal_texts = BTreeMap::new();
+        for column in &plan.temporal_texts {
+            match next_cell()? {
+                (_, Cell::Value(value)) => temporal_texts.insert(column.clone(), value),
+                (index, _) => {
+                    return Err(sql_error(rule, duckdb::Error::InvalidColumnIndex(index)));
+                }
+            };
+        }
+        let tuple = KeyTuple(tuple);
+        // The join may also propose a neighbouring key: keep the row only if every
+        // joined binding's key is exactly the anchor's.
+        let mut exact = true;
+        for fields in &plan.participant_key_fields {
+            let mut joined = Vec::with_capacity(fields.len());
+            for _ in fields {
+                let (_, cell) = next_cell()?;
+                let source = NumberSource::of(&cell);
+                joined.extend(
+                    duckdb_cell_to_protocol(cell)
+                        .ok()
+                        .and_then(|value| key_part(&value, &source)),
+                );
+            }
+            exact &= KeyTuple(joined) == tuple;
+        }
+        if !exact {
+            continue;
+        }
         rows.push(JoinedRow {
-            tuple: KeyTuple(tuple),
+            tuple,
             key,
             values,
             native_comparisons,
+            temporal_texts,
+        });
+    }
+    // Keys are unique in every binding, so each anchor key has exactly one exact row. A
+    // short count means the join missed a counterpart: refuse rather than skip a row.
+    if rows.len() != plan.anchor_key_count {
+        return Err(BindingPredicateError::SqlError {
+            rule_id: rule.id.clone(),
+            message: format!(
+                "keyed join produced {} exact rows for {} anchor keys",
+                rows.len(),
+                plan.anchor_key_count
+            ),
         });
     }
     rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
     Ok(rows)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The report's value for a failed anchor column. A temporal has no protocol value, so its
+/// text, selected on the same joined row, is reported.
 fn localized_affected_value(
     rule: &Rule,
-    connection: &Connection,
-    bindings: &BindingRegistry,
-    keys: &KeyRegistry,
-    fields: &FieldCatalog,
     anchor_binding: &str,
     row: &JoinedRow,
     column: &ColumnId,
@@ -1205,83 +1383,10 @@ fn localized_affected_value(
     if let Ok(value) = row.protocol_value(rule, anchor_binding, column) {
         return Ok(Some(value.clone()));
     }
-    if field_temporal_kind(fields, column).is_none() {
-        return Ok(None);
-    }
-    render_temporal_anchor_value(
-        rule,
-        connection,
-        bindings,
-        keys,
-        anchor_binding,
-        row,
-        column,
-    )
-    .map(Some)
-}
-
-fn render_temporal_anchor_value(
-    rule: &Rule,
-    connection: &Connection,
-    bindings: &BindingRegistry,
-    keys: &KeyRegistry,
-    anchor_binding: &str,
-    row: &JoinedRow,
-    column: &ColumnId,
-) -> Result<Value, BindingPredicateError> {
-    let loaded = bindings
-        .get(anchor_binding)
-        .ok_or_else(|| missing_binding(rule, anchor_binding))?;
-    let anchor_keys = keys
-        .get(anchor_binding)
-        .ok_or_else(|| missing_binding(rule, anchor_binding))?;
-    let mut conditions = Vec::with_capacity(anchor_keys.fields.len());
-    let mut params = Vec::with_capacity(anchor_keys.fields.len());
-    for (field, part) in anchor_keys.fields.iter().zip(&row.tuple.0) {
-        let quoted = quote_identifier(field);
-        match part {
-            KeyPart::Boolean(value) => {
-                conditions.push(format!("{quoted} = ?"));
-                params.push(DuckValue::Boolean(*value));
-            }
-            KeyPart::Number(value) => {
-                conditions.push(format!("CAST({quoted} AS DOUBLE) = ?"));
-                params.push(DuckValue::Double(normalized_number(*value)));
-            }
-            KeyPart::String(value) => {
-                conditions.push(format!("encode({quoted}) = encode(?)"));
-                params.push(DuckValue::Text(value.clone()));
-            }
-        }
-    }
-    let sql = format!(
-        "SELECT CAST({} AS VARCHAR) FROM {} WHERE {} LIMIT 1",
-        quote_identifier(&column.field),
-        quote_identifier(loaded.relation_name()),
-        conditions.join(" AND ")
-    );
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| sql_error(rule, error))?;
-    let mut query = statement
-        .query(params_from_iter(params.iter()))
-        .map_err(|error| sql_error(rule, error))?;
-    let row = query
-        .next()
-        .map_err(|error| sql_error(rule, error))?
-        .ok_or_else(|| {
-            key_invalid(
-                rule,
-                json!({
-                    "rule_id": rule.id,
-                    "binding": anchor_binding,
-                    "key": row.key,
-                    "reason": "missing_anchor_key_for_temporal_render",
-                }),
-            )
-        })?;
-    let raw: DuckValue = row.get(0).map_err(|error| sql_error(rule, error))?;
-    temporal_render_value(rule, column, raw)
+    row.temporal_texts
+        .get(column)
+        .map(|text| temporal_render_value(rule, column, text.clone()))
+        .transpose()
 }
 
 fn temporal_render_value(
