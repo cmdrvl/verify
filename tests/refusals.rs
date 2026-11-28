@@ -299,3 +299,103 @@ fn refusal_report_includes_next_step() {
         "refusal should include non-empty next_step"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Non-finite numbers in authoring (bd-zw7)
+// ---------------------------------------------------------------------------
+
+/// A predicate literal of NaN or an infinity has no protocol number. Compiled as null it is
+/// satisfied by a null row, so authoring must refuse it, one-step and `compile` alike.
+#[test]
+fn non_finite_predicate_literals_are_refused_not_compiled_as_null() {
+    let directory = reserve_temp_directory("verify-refusal-non-finite")
+        .expect("temporary directory should be reserved");
+    let rules = directory.join("rules.yaml");
+    let data = directory.join("data.jsonl");
+    std::fs::write(&data, "{\"v\":null}\n{\"v\":5}\n").expect("write data");
+
+    let mut wrong = Vec::new();
+    for expr in [
+        "{ in: [ { column: v }, [ .inf, 5 ] ] }",
+        "{ in: [ { column: v }, [ 5, -.inf ] ] }",
+        "{ in: [ { column: v }, [ .NaN, 5 ] ] }",
+        "{ eq: [ { column: v }, .nan ] }",
+        "{ or: [ { eq: [ { column: v }, 5 ] }, { eq: [ { column: v }, +.Inf ] } ] }",
+        "{ not: { ne: [ { column: v }, !!float .nan ] } }",
+    ] {
+        std::fs::write(
+            &rules,
+            format!(
+                "constraint_set_id: non_finite\nbindings:\n  input: {{}}\nrules:\n  - id: LITERAL\n    severity: error\n    binding: input\n    op: predicate\n    expr: {expr}\n"
+            ),
+        )
+        .expect("write rules");
+
+        let one_step = verify_command()
+            .arg(&data)
+            .arg("--rules")
+            .arg(&rules)
+            .args(["--json", "--no-witness"])
+            .output()
+            .expect("command should run");
+        let report: Value = serde_json::from_slice(&one_step.stdout).expect("valid json");
+        let compile = verify_command()
+            .arg("compile")
+            .arg(&rules)
+            .output()
+            .expect("command should run");
+
+        if one_step.status.code() != Some(2) || report["refusal"]["code"] != "E_BAD_AUTHORING" {
+            wrong.push(format!(
+                "one-step {expr}: exit {:?}, outcome {}, failed_rules {}",
+                one_step.status.code(),
+                report["outcome"],
+                report["summary"]["failed_rules"]
+            ));
+        }
+        if compile.status.success() || !compile.stdout.is_empty() {
+            wrong.push(format!(
+                "compile {expr}: {}",
+                String::from_utf8_lossy(&compile.stdout)
+                    .split_whitespace()
+                    .collect::<String>()
+            ));
+        }
+    }
+
+    std::fs::remove_file(rules).ok();
+    std::fs::remove_file(data).ok();
+    std::fs::remove_dir(directory).ok();
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The neighbours of the refused spelling still compile: a quoted ".inf" is a string, and an
+/// authored null stays a null.
+#[test]
+fn quoted_non_finite_text_and_authored_null_still_compile() {
+    let directory = reserve_temp_directory("verify-refusal-quoted-non-finite")
+        .expect("temporary directory should be reserved");
+    let rules = directory.join("rules.yaml");
+    std::fs::write(
+        &rules,
+        "constraint_set_id: quoted\nbindings:\n  input: {}\nrules:\n  - id: LITERAL\n    severity: error\n    binding: input\n    op: predicate\n    expr: { in: [ { column: v }, [ \".inf\", \".nan\", null, 5 ] ] }\n",
+    )
+    .expect("write rules");
+
+    let compile = verify_command()
+        .arg("compile")
+        .arg(&rules)
+        .output()
+        .expect("command should run");
+
+    std::fs::remove_file(rules).ok();
+    std::fs::remove_dir(directory).ok();
+
+    assert!(compile.status.success(), "{compile:?}");
+    let artifact: Value = serde_json::from_slice(&compile.stdout).expect("valid json");
+    assert_eq!(
+        artifact["rules"][0]["check"]["expr"]["in"][1],
+        serde_json::json!([".inf", ".nan", null, 5])
+    );
+}
