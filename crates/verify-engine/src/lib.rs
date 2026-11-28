@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod embedded;
+mod exact_sum;
 pub mod grounding;
 pub mod portable_relation;
 pub mod portable_row;

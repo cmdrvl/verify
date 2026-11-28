@@ -479,6 +479,28 @@ These rules govern the value `min` and `max` select:
   row order: an integer is reported over a fraction-form number (`10` over
   `10.0`), and `0.0` over `-0.0`
 
+#### `aggregate_compare` `sum` and `avg` semantics
+
+These rules govern `sum` and `avg`:
+
+- the verdict uses the exact sum of the values as the executor receives them, so
+  row order cannot change it: an integer is itself, and a binary float is the
+  shortest decimal a report prints for it (`0.1` is one tenth, and `0.1 + 0.2`
+  equals `0.3`)
+- thresholds and tolerances are read the same way, and are compared exactly; an
+  average is compared as the sum against the threshold times the row count, so
+  no division decides a verdict
+- the reported value keeps its usual form where an `f64` holds the sum; a wider
+  integer sum is reported as an integer where it fits; otherwise, and for an
+  average, the report shows the nearest `f64`
+- every value must be a number, and `avg` needs at least one row; otherwise
+  `E_BAD_EXPR`
+- interim, until numbers are loaded exactly: a fraction-form number of
+  magnitude 2^53 or more, as a value, threshold or tolerance, refuses with
+  `E_BAD_EXPR`, because it may already have been rounded
+- this makes the arithmetic exact, not the loading: a decimal already rounded
+  when it was read stays rounded
+
 #### `not_null` missingness semantics
 
 V0 must pin missingness semantics for string-like batch inputs explicitly.
