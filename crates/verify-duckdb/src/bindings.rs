@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
@@ -533,7 +533,7 @@ fn load_single_binding(
             source,
         })?;
 
-    let columns = describe_relation(connection, &declared.name).map_err(|source| {
+    let mut columns = describe_relation(connection, &declared.name).map_err(|source| {
         BatchBindingError::Load {
             binding: declared.name.clone(),
             path: path.clone(),
@@ -543,6 +543,7 @@ fn load_single_binding(
 
     if matches!(format, BindingFormat::Json | BindingFormat::Jsonl) {
         enforce_row_oriented_json(&declared.name, &path, &columns)?;
+        columns = keep_json_strings(connection, format, &declared.name, &path, columns)?;
     }
 
     let row_count =
@@ -609,6 +610,99 @@ fn describe_relation(
         columns.push(row?);
     }
     Ok(columns)
+}
+
+/// The column types DuckDB's JSON reader can only have taken from a JSON boolean, number or
+/// string kept as text. Any other scalar type it inferred from what a string looks like.
+const JSON_VALUE_TYPES: &[&str] = &[
+    "BOOLEAN", "BIGINT", "UBIGINT", "HUGEINT", "UHUGEINT", "DOUBLE", "VARCHAR",
+];
+
+/// JSON says which values are strings, so a loader must not turn one into a date, time,
+/// timestamp or UUID: that changes which strings are equal. Where the reader did, the file
+/// is read again with those columns declared VARCHAR, which keeps each string as written.
+///
+/// The second read matches columns to object keys by name. DuckDB renames a key it cannot
+/// use as a column name (keys differing only in case, an empty key), and a renamed column
+/// would match nothing and load as null. So the names must be the file's keys exactly.
+fn keep_json_strings(
+    connection: &Connection,
+    format: BindingFormat,
+    relation_name: &str,
+    path: &Path,
+    columns: Vec<BindingColumn>,
+) -> Result<Vec<BindingColumn>, BatchBindingError> {
+    let inferred = |column: &BindingColumn| !JSON_VALUE_TYPES.contains(&column.data_type.as_str());
+    if !columns.iter().any(inferred) {
+        return Ok(columns);
+    }
+
+    let load = |source| BatchBindingError::Load {
+        binding: relation_name.to_owned(),
+        path: path.to_path_buf(),
+        source,
+    };
+    let keys = json_object_keys(connection, format, path).map_err(load)?;
+    let names = columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<BTreeSet<_>>();
+    if names != keys {
+        return Err(BatchBindingError::FormatDetect {
+            binding: relation_name.to_owned(),
+            path: path.to_path_buf(),
+            detail: "cannot keep its date-like, time-like or UUID-like strings as text: the \
+                     column names are not the object keys (rows that are not objects, an empty \
+                     key, or keys differing only in case)"
+                .to_owned(),
+        });
+    }
+
+    let declared = columns
+        .iter()
+        .map(|column| {
+            let data_type = if inferred(column) {
+                "VARCHAR"
+            } else {
+                column.data_type.as_str()
+            };
+            format!("'{}': '{data_type}'", column.name.replace('\'', "''"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reader = if format == BindingFormat::Jsonl {
+        "read_ndjson_auto"
+    } else {
+        "read_json_auto"
+    };
+    let relation = quote_identifier(relation_name);
+    connection
+        .execute_batch(&format!(
+            "DROP TABLE {relation}; CREATE TEMP TABLE {relation} AS SELECT * FROM {reader}('{}', columns={{{declared}}});",
+            sql_string_literal(path)
+        ))
+        .map_err(load)?;
+    describe_relation(connection, relation_name).map_err(load)
+}
+
+/// Every key of every top-level object in a JSON or JSONL file, as written.
+fn json_object_keys(
+    connection: &Connection,
+    format: BindingFormat,
+    path: &Path,
+) -> duckdb::Result<BTreeSet<String>> {
+    let reader = if format == BindingFormat::Jsonl {
+        "read_ndjson_objects"
+    } else {
+        "read_json_objects_auto"
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT DISTINCT unnest(json_keys(json)) FROM {reader}('{}')",
+        sql_string_literal(path)
+    ))?;
+    statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect()
 }
 
 fn count_rows(connection: &Connection, relation_name: &str) -> duckdb::Result<u64> {

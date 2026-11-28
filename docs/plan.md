@@ -981,6 +981,15 @@ Format detection follows the spine-era DuckDB assumptions:
 
 Unknown or unsupported binding formats refuse before rule evaluation.
 
+A JSON or JSONL string loads as a string, exactly as written. The reader must not
+turn one into a date, time, timestamp or UUID. Keeping it as text needs each
+column to be named by its object key; where the reader had to rename a key (keys
+differing only in case, an empty key) or a row is not an object, and such a
+string is present, the binding refuses with `E_FORMAT_DETECT`. CSV carries no
+types and is not covered by this rule. Comparisons on such a column, in
+predicates and in query rules, are therefore string comparisons; a query rule
+that means dates must `CAST` the column.
+
 ### Rule identity and determinism
 
 Every rule must have:
