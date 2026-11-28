@@ -444,7 +444,38 @@ When a failing rule has many localized rows, `--sample-affected <N>` limits the 
 - The value matches in exact decimal arithmetic, and a percentage or basis-point figure is claimed as `percent` or `bps` (a plain quantity is not). Otherwise `E_SCALE_MISMATCH`.
 - If the claim has a `unit`, the document states that unit on the number itself: otherwise `E_UNIT_NOT_ESTABLISHED`. A currency code or `US$` establishes `USD`; `€`, `£`, `₹` and the currency names next to a number establish theirs. **A bare `$` does not establish `USD`** (or any other dollar): claim `"unit":"$"` for it. `¥` works the same way. A sign with other letters joined to it (`E£`, `CN¥`, `Cdn.$`, `U.S.$`) is not the plain currency and establishes none of these. A spaced prefix (`US $`, `CA $`) establishes no unit by itself, neither a bare `$` nor a code, because the words in front of a `$` may be prose; with a matching code on the same number (`CA $41.2 million CAD`) that code is established. Besides currencies, only `percent`/`%` and `bps` can be established; other units, such as `shares`, do not pass.
 
-**What PASS does not show.** It does not read meaning: "not", "up to" or "more than" outside the quote are not checked, so quote enough text to carry them. Text hidden by CSS is still searched. A quote may run across adjacent table cells or blocks. In a plain-text file, anything shaped like a tag is removed. Scale words are recognised in English and a few other forms only. Text written without spaces between words, such as Chinese or Japanese, can only be quoted in whole runs.
+#### Behaviour changes from released 0.7.6
+
+Call these out in the release notes. Released 0.7.6 passes each of these claims; they no longer pass:
+
+- **A bare `$` claimed as `USD`.** Claim `"unit":"$"`, or use a document that states `USD` or `US$`.
+- **Any unit besides a currency, `percent` or `bps`,** such as `shares`.
+- **A lone `M`, with or without a currency.** `$8M` claimed as 8 millions passed in 0.7.6 and is now `E_NUMBER_UNBOUND`, because some writers use `M` for thousands. `$8K` is still thousands.
+- **A quote with more than one number,** including a date beside the amount. Quote only the text around the amount.
+- **A number in parentheses.** Its sign is not established.
+- **A number without its own scale word in a document that declares a scale** ("in thousands", "US$'000").
+
+The rules above refuse more than these; this list is the choices most likely to affect claims that look right.
+
+#### Known limits
+
+A `PASS` does not show any of the following.
+
+Currency:
+
+- **A single letter before a spaced `$` can be cut off.** From `C $41.2 million` (or `A $`, `S $`), the quote `$41.2 million` passes, even with unit `$`. These are left alone because `Class A $5 million` would otherwise be refused.
+- **A quote may leave the currency out when the claim states no unit.** `41.2 million` quoted from `C$41.2 million` passes. A claimed unit is still checked against the document.
+- **Other spellings of a spaced prefix are not recognised** and can be cut off the same way: for example `U.S` without its last dot, `A.U.`, `(US)`, `US:`, `US-`, `Can`, `NT`, or a footnote marker between the prefix and the `$`.
+- **A quote with no digits may end just after the `$`** in `$US` or `$CAD`.
+- **`Rs.` is not recognised as a currency,** so `41.2 million` can be quoted from `Rs.41.2 million`.
+- **A currency name that does not follow a number can be cut:** `Amounts are in Canadian` passes against `Amounts are in Canadian dollars.`
+
+Words and meaning:
+
+- **A scale phrase can be cut in a quote with no digits,** such as `cent applied` from `per cent applied`. No numeric claim can bind to such a quote.
+- **Meaning outside the quote is not read:** "not", "up to" or "more than" left outside the quote are not checked, so quote enough text to carry them.
+- **Text hidden by CSS is still searched.** A quote may run across adjacent table cells or blocks. In a plain-text file, anything shaped like a tag is removed.
+- **Scale words are recognised in English and a few other forms only.** Text written without spaces between words, such as Chinese or Japanese, can only be quoted in whole runs.
 
 The command reuses `verify.report.v1` and the existing redaction: failing quote and value details are ordinal refs by default and raw only with `--explicit`.
 
