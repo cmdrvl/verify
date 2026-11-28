@@ -2406,6 +2406,62 @@ fn billion_and_trillion_rules_stay_fail_closed() {
 }
 
 #[test]
+fn milliarde_and_milliarden_mark_a_long_scale_document() {
+    assert_none_pass(&[
+        case(
+            "singular Milliarde beside Billion",
+            "Es war 1 Milliarde und dann 1 Billion.",
+            "dann 1 Billion",
+            n("1", "billions"),
+        ),
+        case(
+            "plural Milliarden beside a trillion figure",
+            "Es waren 2 Milliarden. Total: 3 trillion.",
+            "3 trillion",
+            n("3", "trillions"),
+        ),
+        case(
+            "capital letters",
+            "MILLIARDE EURO. Total: 1 BILLION.",
+            "1 BILLION",
+            n("1", "billions"),
+        ),
+        case(
+            "inside a compound word",
+            "Die Milliardengrenze. Total: 1 Billion.",
+            "1 Billion",
+            n("1", "billions"),
+        ),
+    ]);
+}
+
+#[test]
+fn capitalized_billion_is_the_english_short_scale() {
+    assert_all_pass(&[
+        case(
+            "title case",
+            "Fund Reaches $1.3 Billion In Assets",
+            "$1.3 Billion",
+            n("1.3", "billions"),
+        ),
+        case(
+            "upper case",
+            "NET ASSETS: $1.3 BILLION",
+            "$1.3 BILLION",
+            n("1300", "millions"),
+        ),
+        // A stated limit, not an endorsement: nothing here marks the text as long scale, so
+        // German "1 Billion" (a million millions) is read as a thousand million.
+        case(
+            "German text with no other long-scale word",
+            "Der Wert war 1 Billion Euro.",
+            "1 Billion",
+            n("1000", "millions"),
+        ),
+    ]);
+}
+
+#[test]
 fn ambiguous_claim_scales_and_overflow_are_refused() {
     for scale in ["b", "t", "B", "T", "bil", "mrd"] {
         let line = format!(

@@ -987,7 +987,9 @@ pub(super) fn tokens(text: &str, breaks: &[TagBreak]) -> Vec<NumberToken> {
 }
 
 /// Whether the document also uses words of a long-scale language, where "billion" is a
-/// million millions: then English `billion` and `trillion` cannot be established.
+/// million millions: then English `billion` and `trillion` cannot be established. Words are
+/// found anywhere, in any letter case, so `milliard` covers `Milliarde`, `Milliarden` and
+/// `milliards`. Without such a word, `billion` in any letter case is the English short scale.
 fn uses_long_scale(text: &str) -> bool {
     let lower = text.to_lowercase();
     ["milliard", "billionen", "billones", "bill\u{f3}n"]
