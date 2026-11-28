@@ -1828,11 +1828,13 @@ fn quotes_around_whole_currency_markers_still_pass() {
 // ---- bd-22j: a prefix written apart from its `$` ------------------------------------------
 
 /// The prefixes in scope, each with the currency code it points to.
-const SPACED: [(&str, &str); 7] = [
+const SPACED: [(&str, &str); 9] = [
     ("US", "USD"),
     ("U.S.", "USD"),
     ("CA", "CAD"),
     ("Cdn", "CAD"),
+    ("Cdn.", "CAD"),
+    ("CDN", "CAD"),
     ("HK", "HKD"),
     ("NZ", "NZD"),
     ("AU", "AUD"),
@@ -2026,6 +2028,14 @@ fn ordinary_words_before_a_dollar_sign_are_not_markers() {
         ("A PLUS $5 million bonus.", "$5 million bonus"),
         ("The BUS $5 million fleet.", "$5 million fleet"),
         ("The EU $5 million grant.", "$5 million grant"),
+        // Look-alikes of `Cdn.` and `CDN`: another case, a sentence end, a longer word.
+        ("The cdn. $5 million budget grew.", "$5 million budget"),
+        (
+            "We left the CDN. $5 million came later.",
+            "$5 million came later",
+        ),
+        ("Our CDNs $5 million budget grew.", "$5 million budget"),
+        ("The ACDN $5 million deal closed.", "$5 million deal"),
         // Single letters are an open operator choice and are left alone.
         ("Class A $5 million notes.", "$5 million notes"),
         // Punctuation between the word and the sign breaks the marker.
