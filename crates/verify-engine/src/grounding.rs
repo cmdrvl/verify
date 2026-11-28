@@ -805,6 +805,10 @@ fn resolve_quote(
         .as_ref()
         .map(|document| numbers::tokens(&document.text, &document.breaks))
         .unwrap_or_default();
+    let markers = normalized_document
+        .as_ref()
+        .map(|document| numbers::currency_markers(&document.text, &tokens))
+        .unwrap_or_default();
 
     if let Some(span) = &claim.byte_span {
         if span.start > span.end || span.end > document.bytes.len() {
@@ -830,7 +834,7 @@ fn resolve_quote(
             (!target.is_empty()
                 && reads_alone
                 && quoted
-                && numbers::stands_alone(&document.text, &tokens, start, end))
+                && numbers::stands_alone(&document.text, &tokens, &markers, start, end))
             .then(|| quoted_numbers(&document.text, &tokens, start, end))
         });
         if let Some(numbers) = matched {
@@ -841,9 +845,9 @@ fn resolve_quote(
             });
         }
 
-        let elsewhere = normalized_document
-            .as_ref()
-            .is_some_and(|document| !normalized_matches(document, &tokens, &target).is_empty());
+        let elsewhere = normalized_document.as_ref().is_some_and(|document| {
+            !normalized_matches(document, &tokens, &markers, &target).is_empty()
+        });
         return Ok(QuoteResolution {
             raw_span: Some(span.clone()),
             numbers: Vec::new(),
@@ -863,7 +867,7 @@ fn resolve_quote(
     let Some(normalized_document) = normalized_document else {
         return Ok(not_found());
     };
-    let matches = normalized_matches(&normalized_document, &tokens, &target);
+    let matches = normalized_matches(&normalized_document, &tokens, &markers, &target);
     match matches.as_slice() {
         [] => Ok(not_found()),
         [(start, end)] => Ok(QuoteResolution {
@@ -926,6 +930,7 @@ fn quote_result(
 fn normalized_matches(
     document: &NormalizedText,
     tokens: &[NumberToken],
+    markers: &[(usize, usize)],
     target: &str,
 ) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
@@ -936,7 +941,7 @@ fn normalized_matches(
     while let Some(relative) = document.text[from..].find(target) {
         let start = from + relative;
         let end = start + target.len();
-        if numbers::stands_alone(&document.text, tokens, start, end) {
+        if numbers::stands_alone(&document.text, tokens, markers, start, end) {
             matches.push((start, end));
         }
         // Occurrences may overlap, and a rejected one must not hide the next.

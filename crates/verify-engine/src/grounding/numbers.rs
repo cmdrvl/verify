@@ -44,6 +44,8 @@ pub(super) struct NumberToken {
     core_start_index: usize,
     core_end_index: usize,
     pub currencies: Vec<Currency>,
+    /// Byte range of the currency written after the number.
+    trailing_marker: Option<(usize, usize)>,
 }
 
 impl NumberToken {
@@ -302,7 +304,16 @@ struct Document<'a> {
     offsets: Vec<usize>,
 }
 
-impl Document<'_> {
+impl<'a> Document<'a> {
+    fn new(text: &'a str) -> Self {
+        let (offsets, chars) = text.char_indices().unzip();
+        Self {
+            text,
+            chars,
+            offsets,
+        }
+    }
+
     fn at(&self, index: usize) -> Option<char> {
         self.chars.get(index).copied()
     }
@@ -353,6 +364,45 @@ struct Prefix {
     unclear_sign: bool,
 }
 
+/// Where the currency marker ending in the symbol at `symbol` starts: the short letter runs
+/// attached to it, with or without dots (`C$`, `US$`, `CN¥`, `Cdn.$`, `U.S.$`). A longer word
+/// run into the symbol ("totaled$5") is not part of the marker.
+fn marker_start(document: &Document<'_>, symbol: usize) -> usize {
+    let mut start = symbol;
+    loop {
+        let dotted = start > 0 && document.chars[start - 1] == '.';
+        let letters_end = start - usize::from(dotted);
+        let mut letters_start = letters_end;
+        while letters_start > 0 && document.chars[letters_start - 1].is_ascii_alphabetic() {
+            letters_start -= 1;
+        }
+        let length = letters_end - letters_start;
+        // Letters run into a longer or non-ASCII word are the end of that word.
+        let inside_word = letters_start > 0 && document.chars[letters_start - 1].is_alphabetic();
+        if length == 0 || length > 3 || inside_word {
+            return start;
+        }
+        start = letters_start;
+    }
+}
+
+/// Byte ranges of the currency markers of more than one character, in document order: letters
+/// joined to a symbol, and currency names written after a number. A quote may not start or end
+/// inside one.
+pub(super) fn currency_markers(text: &str, tokens: &[NumberToken]) -> Vec<(usize, usize)> {
+    let document = Document::new(text);
+    let mut markers: Vec<(usize, usize)> = (0..document.chars.len())
+        .filter(|index| is_currency_symbol(document.chars[*index]))
+        .filter_map(|symbol| {
+            let start = marker_start(&document, symbol);
+            (start < symbol).then(|| (document.offset(start), document.offset(symbol + 1)))
+        })
+        .chain(tokens.iter().filter_map(|number| number.trailing_marker))
+        .collect();
+    markers.sort_unstable();
+    markers
+}
+
 fn prefix(document: &Document<'_>, core: usize) -> Prefix {
     let mut found = Prefix {
         start: core,
@@ -367,16 +417,14 @@ fn prefix(document: &Document<'_>, core: usize) -> Prefix {
         }
         let character = document.chars[end - 1];
         if is_currency_symbol(character) {
-            let mut start = end - 1;
-            let (letters, letters_start) = document.word_before(start);
-            let mut letters = if letters.len() <= 3 && character == '$' {
-                start = letters_start;
-                letters
+            let start = marker_start(document, end - 1);
+            let letters = document.slice(start, end - 1).to_ascii_uppercase();
+            // A dotted prefix (`Cdn.$`) is a marker this module cannot name.
+            found.currencies.push(if letters.contains('.') {
+                Currency::Other
             } else {
-                String::new()
-            };
-            letters.make_ascii_uppercase();
-            found.currencies.push(symbol_currency(&letters, character));
+                symbol_currency(&letters, character)
+            });
             cursor = start;
         } else if character.is_alphabetic() {
             let (word, start) = document.word_before(end);
@@ -673,8 +721,13 @@ fn read_number(document: &Document<'_>, core: usize) -> NumberToken {
 
     let mut after_currency = suffix_end;
     let mut scale_after_currency = None;
+    let mut trailing_marker = None;
     if let Some((currency, end)) = trailing_currency(document, suffix_end) {
         currencies.push(currency);
+        trailing_marker = Some((
+            document.offset(document.skip_space(suffix_end)),
+            document.offset(end),
+        ));
         after_currency = end;
         // "5 USD million": the scale sits beyond the currency.
         let (word, word_end) = document.word_at(document.skip_space(end));
@@ -749,6 +802,7 @@ fn read_number(document: &Document<'_>, core: usize) -> NumberToken {
         core_start_index: core,
         core_end_index: core_end,
         currencies,
+        trailing_marker,
     }
 }
 
@@ -813,12 +867,7 @@ fn link(document: &Document<'_>, tokens: &mut [NumberToken]) {
 
 /// Every number in `text`, in order.
 pub(super) fn tokens(text: &str, breaks: &[TagBreak]) -> Vec<NumberToken> {
-    let (offsets, chars) = text.char_indices().unzip();
-    let document = Document {
-        text,
-        chars,
-        offsets,
-    };
+    let document = Document::new(text);
     let mut found = Vec::new();
     let mut index = 0;
     while index < document.chars.len() {
@@ -854,8 +903,23 @@ pub(super) fn tokens(text: &str, breaks: &[TagBreak]) -> Vec<NumberToken> {
     found
 }
 
-/// Whether `text[start..end]` stands on its own: it cuts neither a word nor a number.
-pub(super) fn stands_alone(text: &str, tokens: &[NumberToken], start: usize, end: usize) -> bool {
+/// Whether `text[start..end]` stands on its own: it cuts neither a word, a number nor a
+/// currency marker.
+pub(super) fn stands_alone(
+    text: &str,
+    tokens: &[NumberToken],
+    markers: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> bool {
+    // Markers are in document order and do not overlap.
+    let inside_marker = |position: usize| {
+        let before = markers.partition_point(|(from, _)| *from < position);
+        before > 0 && position < markers[before - 1].1
+    };
+    if inside_marker(start) || inside_marker(end) {
+        return false;
+    }
     let matched = &text[start..end];
     let (Some(first), Some(last)) = (matched.chars().next(), matched.chars().next_back()) else {
         return false;
