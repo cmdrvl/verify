@@ -319,16 +319,35 @@ fn run_shortcut_inner(args: &ShortcutArgs) -> Result<VerifyReport, VerifyReport>
     // 1. Compile authoring YAML/SQL into a ConstraintSet.
     let mut constraints = compile_authoring(&args.rules)?;
 
-    // 2. Override key_fields if --key is provided.
+    // 2. --key supplies key_fields only where authoring declared none. One that disagrees
+    //    with authored key_fields is refused: it never rewrites the authored contract.
     if let Some(key) = &args.key
         && let Some(binding) = constraints.bindings.first_mut()
     {
-        binding.key_fields = vec![key.clone()];
+        if binding.key_fields.is_empty() {
+            binding.key_fields = vec![key.clone()];
+        } else if binding.key_fields != std::slice::from_ref(key) {
+            let detail = json!({
+                "binding": binding.name,
+                "authored_key_fields": binding.key_fields,
+                "cli_key_field": key,
+            });
+            let message = format!(
+                "--key {key} conflicts with the authored key_fields of binding {}",
+                binding.name
+            );
+            return Err(batch_refusal_ctx(
+                &constraints.constraint_set_id,
+                &constraint_hash(&constraints),
+                RefusalCode::KeyConflict,
+                message,
+                detail,
+            ));
+        }
     }
 
     // 3. Hash the compiled constraints (serialized form).
-    let constraint_json = serde_json::to_vec(&constraints).expect("ConstraintSet serializes");
-    let constraint_hash = sha256_of_bytes(&constraint_json);
+    let constraint_hash = constraint_hash(&constraints);
 
     // 4. Determine the single binding name.
     let binding_name = constraints
@@ -375,6 +394,11 @@ fn run_shortcut_inner(args: &ShortcutArgs) -> Result<VerifyReport, VerifyReport>
 
     // 8. Evaluate all rules.
     evaluate_batch(&constraints, &constraint_hash, context, lock_results)
+}
+
+/// The hash of an in-memory contract, as the one-step path has no compiled file.
+fn constraint_hash(constraints: &ConstraintSet) -> String {
+    sha256_of_bytes(&serde_json::to_vec(constraints).expect("ConstraintSet serializes"))
 }
 
 // ---------------------------------------------------------------------------
