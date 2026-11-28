@@ -9,7 +9,6 @@ use verify_core::{
 
 use crate::{
     Relation,
-    exact_sum::{Exact, Term, Unreadable},
     scalar::{value_category, value_type},
 };
 
@@ -114,22 +113,9 @@ fn evaluate_aggregate_compare(
     relations: &BTreeMap<String, Relation>,
 ) -> Result<Vec<AffectedEntry>, RelationEngineError> {
     let relation = relation(binding, relations)?;
-    let (observed, passed) = match aggregate_kind(aggregate)? {
-        AggregateKind::Sum(field) => compare_total(binding, relation, field, false, compare)?,
-        AggregateKind::Avg(field) => compare_total(binding, relation, field, true, compare)?,
-        AggregateKind::Min(field) => {
-            let observed = extremum(binding, relation, field, Extremum::Min)?;
-            let passed = evaluate_comparison(&observed, compare)?;
-            (observed, passed)
-        }
-        AggregateKind::Max(field) => {
-            let observed = extremum(binding, relation, field, Extremum::Max)?;
-            let passed = evaluate_comparison(&observed, compare)?;
-            (observed, passed)
-        }
-    };
+    let observed = compute_aggregate(binding, relation, aggregate)?;
 
-    if passed {
+    if evaluate_comparison(&observed, compare)? {
         Ok(Vec::new())
     } else {
         let field = aggregate_field(aggregate)?.to_owned();
@@ -179,120 +165,37 @@ fn evaluate_foreign_key(
     Ok(affected)
 }
 
-/// `sum` or `avg`: the value a report shows, and whether the comparison holds. The verdict
-/// uses the exact sum (an average compares it with `threshold x rows`), so no row order can
-/// change it. Every refusal is chosen without regard to row order.
-fn compare_total(
+fn compute_aggregate(
     binding: &str,
     relation: &Relation,
-    field: &str,
-    average: bool,
-    compare: &Comparison,
-) -> Result<(Value, bool), RelationEngineError> {
-    if average && relation.rows.is_empty() {
-        return Err(RelationEngineError::BadExpression(
-            "aggregate_compare avg requires at least one row".to_owned(),
-        ));
-    }
-    let values = relation
-        .rows
-        .iter()
-        .map(|row| require_field(binding, row, field))
-        .collect::<Result<Vec<_>, _>>()?;
-    let read: Vec<Result<Term, Unreadable>> = values
-        .iter()
-        .map(|value| {
-            value
-                .as_number()
-                .ok_or(Unreadable::NotANumber)
-                .and_then(Term::read)
-        })
-        .collect();
-    if read
-        .iter()
-        .any(|term| matches!(term, Err(Unreadable::NotANumber)))
-    {
-        return Err(RelationEngineError::BadExpression(format!(
-            "aggregate field {binding}.{field} must contain numeric values"
-        )));
-    }
-    let terms = read
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| wide_float(&format!("a value of {binding}.{field}")))?;
-
-    let rows = if average {
-        relation.rows.len() as u64
-    } else {
-        1
-    };
-    let sum = Exact::sum(&terms);
-    let observed = if average {
-        sum.reported_quotient(rows)
-    } else {
-        sum.reported()
-    }
-    .ok_or_else(|| RelationEngineError::BadExpression("invalid numeric aggregate".to_owned()))?;
-
-    check_comparison(&observed, compare)?;
-    // Every declared number is read before any operator is decided, so a false operator
-    // cannot hide one that must refuse.
-    let times_rows = |term: Term| Exact::sum(&[term]).times(rows);
-    for threshold in [
-        &compare.eq,
-        &compare.ne,
-        &compare.gt,
-        &compare.gte,
-        &compare.lt,
-        &compare.lte,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        exact_threshold(threshold)?;
-    }
-    let bound = compare
-        .tolerance
-        .map(|tolerance| {
-            Term::float(tolerance)
-                .map(times_rows)
-                .map_err(|_| wide_float("the tolerance"))
-        })
-        .transpose()?;
-
-    let passed = decide(
-        compare,
-        |expected| {
-            let target = times_rows(exact_threshold(expected)?);
-            Ok(match &bound {
-                Some(bound) => sum.within(&target, bound),
-                None => sum.compare(&target) == Ordering::Equal,
-            })
-        },
-        |expected| Ok(sum.compare(&times_rows(exact_threshold(expected)?))),
-    )?;
-    Ok((observed, passed))
-}
-
-fn exact_threshold(threshold: &Value) -> Result<Term, RelationEngineError> {
-    threshold
-        .as_number()
-        .ok_or(Unreadable::NotANumber)
-        .and_then(Term::read)
-        .map_err(|reason| match reason {
-            Unreadable::WideFloat => wide_float("a threshold"),
-            Unreadable::NotANumber => {
-                RelationEngineError::BadExpression("invalid numeric value".to_owned())
+    aggregate: &Aggregate,
+) -> Result<Value, RelationEngineError> {
+    match aggregate_kind(aggregate)? {
+        AggregateKind::Sum(field) => {
+            let mut sum = 0.0_f64;
+            for row in &relation.rows {
+                let value = require_field(binding, row, field)?;
+                sum += as_f64(binding, field, value)?;
             }
-        })
-}
+            numeric_value(sum)
+        }
+        AggregateKind::Avg(field) => {
+            if relation.rows.is_empty() {
+                return Err(RelationEngineError::BadExpression(
+                    "aggregate_compare avg requires at least one row".to_owned(),
+                ));
+            }
 
-/// Interim, until numbers are loaded exactly (bd-1t5).
-fn wide_float(what: &str) -> RelationEngineError {
-    RelationEngineError::BadExpression(format!(
-        "sum and avg refuse {what}: a fraction-form number of magnitude 2^53 or more may \
-         already be rounded (interim limit)"
-    ))
+            let mut sum = 0.0_f64;
+            for row in &relation.rows {
+                let value = require_field(binding, row, field)?;
+                sum += as_f64(binding, field, value)?;
+            }
+            numeric_value(sum / relation.rows.len() as f64)
+        }
+        AggregateKind::Min(field) => extremum(binding, relation, field, Extremum::Min),
+        AggregateKind::Max(field) => extremum(binding, relation, field, Extremum::Max),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -407,57 +310,42 @@ fn evaluate_comparison(
     observed: &Value,
     compare: &Comparison,
 ) -> Result<bool, RelationEngineError> {
-    check_comparison(observed, compare)?;
-    decide(
-        compare,
-        |expected| compare_eq(observed, expected, compare.tolerance),
-        |expected| {
-            compare_values(observed, expected).ok_or_else(|| {
-                RelationEngineError::BadExpression("values are not comparable".to_owned())
-            })
-        },
-    )
-}
-
-/// The tolerance and every threshold's type, refused before any operator is decided.
-fn check_comparison(observed: &Value, compare: &Comparison) -> Result<(), RelationEngineError> {
     if compare.has_invalid_tolerance() {
         return Err(RelationEngineError::BadExpression(
             "tolerance must be a finite number of zero or more".to_owned(),
         ));
     }
-    check_threshold_types(observed, compare)
-}
+    check_threshold_types(observed, compare)?;
 
-/// Whether every declared operator holds, given how the observed value equals (within any
-/// tolerance) and orders against a threshold.
-fn decide(
-    compare: &Comparison,
-    equals: impl Fn(&Value) -> Result<bool, RelationEngineError>,
-    order: impl Fn(&Value) -> Result<Ordering, RelationEngineError>,
-) -> Result<bool, RelationEngineError> {
-    let is = |expected: &Value, wanted: &[Ordering]| {
-        order(expected).map(|ordering| wanted.contains(&ordering))
-    };
     let predicates = [
-        compare.eq.as_ref().map(&equals),
-        compare.ne.as_ref().map(|expected| Ok(!equals(expected)?)),
+        compare
+            .eq
+            .as_ref()
+            .map(|expected| compare_eq(observed, expected, compare.tolerance)),
+        compare
+            .ne
+            .as_ref()
+            .map(|expected| Ok(!compare_eq(observed, expected, compare.tolerance)?)),
         compare
             .gt
             .as_ref()
-            .map(|expected| is(expected, &[Ordering::Greater])),
-        compare
-            .gte
-            .as_ref()
-            .map(|expected| is(expected, &[Ordering::Greater, Ordering::Equal])),
+            .map(|expected| compare_ordering(observed, expected, Ordering::Greater)),
+        compare.gte.as_ref().map(|expected| {
+            let ordering = compare_values(observed, expected).ok_or_else(|| {
+                RelationEngineError::BadExpression("values are not comparable".to_owned())
+            })?;
+            Ok(matches!(ordering, Ordering::Greater | Ordering::Equal))
+        }),
         compare
             .lt
             .as_ref()
-            .map(|expected| is(expected, &[Ordering::Less])),
-        compare
-            .lte
-            .as_ref()
-            .map(|expected| is(expected, &[Ordering::Less, Ordering::Equal])),
+            .map(|expected| compare_ordering(observed, expected, Ordering::Less)),
+        compare.lte.as_ref().map(|expected| {
+            let ordering = compare_values(observed, expected).ok_or_else(|| {
+                RelationEngineError::BadExpression("values are not comparable".to_owned())
+            })?;
+            Ok(matches!(ordering, Ordering::Less | Ordering::Equal))
+        }),
     ];
 
     let mut saw_predicate = false;
@@ -523,6 +411,17 @@ fn compare_eq(
         }
         _ => Ok(values_equal(observed, expected)),
     }
+}
+
+fn compare_ordering(
+    observed: &Value,
+    expected: &Value,
+    target: Ordering,
+) -> Result<bool, RelationEngineError> {
+    let ordering = compare_values(observed, expected).ok_or_else(|| {
+        RelationEngineError::BadExpression("values are not comparable".to_owned())
+    })?;
+    Ok(ordering == target)
 }
 
 fn relation<'a>(
@@ -624,6 +523,14 @@ fn ensure_comparable(field: &str, value: &Value) -> Result<(), RelationEngineErr
             "aggregate field {field} must contain comparable scalar values"
         ))),
     }
+}
+
+fn as_f64(binding: &str, field: &str, value: &Value) -> Result<f64, RelationEngineError> {
+    value.as_f64().ok_or_else(|| {
+        RelationEngineError::BadExpression(format!(
+            "aggregate field {binding}.{field} must contain numeric values"
+        ))
+    })
 }
 
 fn numeric_value(value: f64) -> Result<Value, RelationEngineError> {
@@ -942,11 +849,18 @@ mod tests {
                 .map(|value| row(&[("v", value.clone())]))
                 .collect(),
         );
-        let which = match function {
-            "min" => super::Extremum::Min,
-            _ => super::Extremum::Max,
+        let field = Some("v".to_owned());
+        let aggregate = match function {
+            "min" => Aggregate {
+                min: field,
+                ..Default::default()
+            },
+            _ => Aggregate {
+                max: field,
+                ..Default::default()
+            },
         };
-        super::extremum("input", &relation, "v", which)
+        super::compute_aggregate("input", &relation, &aggregate)
     }
 
     /// `expected` is compared as serialized text, which tells `10` from `10.0` and `0.0` from
