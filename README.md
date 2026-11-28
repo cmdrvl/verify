@@ -431,6 +431,8 @@ When a failing rule has many localized rows, `--sample-affected <N>` limits the 
 {"claim_id":"loan-amount","source":"filing","quote":"95000000.00000000","byte_span":{"start":123,"end":140},"value":95,"scale":"millions"}
 ```
 
+The binary describes its own inputs, with no other arguments needed: `verify ground --schema` (or `--describe`, `--input-schema`) prints the JSON Schema of one claims line (`verify.claims.v1`), `verify compile --input-schema` the schema of YAML or JSON rule authoring (`verify.authoring.v1`), and `verify compile --schema` the compiled artifact's schema. `verify ground --help` and `verify robot-docs guide` show the fields with copy-paste examples.
+
 > The rules below are stricter than released 0.7.6, which passes many unsupported claims, including a quote that cuts a word or number and a unit the document never states. They apply from the first release that includes them.
 
 **Text.** The pure-Rust engine drops HTML tags and comments and the contents of `script` and `style`, decodes common named entities and numeric character references, removes soft hyphens and zero-width characters, and collapses whitespace to one space. Styling tags (`span`, `b`, `i`, `font`, `a`, inline XBRL and the like) join the text around them; every other tag, including table cells, `br`, `sup` and XML elements, separates it. A `<` that does not start a tag name is ordinary text.

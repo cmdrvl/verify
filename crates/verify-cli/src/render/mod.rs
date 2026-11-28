@@ -5,6 +5,8 @@ pub mod json;
 
 const CONSTRAINT_SCHEMA: &str =
     include_str!("../../../../schemas/verify.constraint.v1.schema.json");
+const AUTHORING_SCHEMA: &str = include_str!("../../../../schemas/verify.authoring.v1.schema.json");
+const CLAIMS_SCHEMA: &str = include_str!("../../../../schemas/verify.claims.v1.schema.json");
 const OPERATOR_JSON: &str = include_str!("../../../../operator.json");
 const REPORT_SCHEMA: &str = include_str!("../../../../schemas/verify.report.v1.schema.json");
 
@@ -23,6 +25,16 @@ pub fn render_report(
 
 pub fn constraint_schema() -> &'static str {
     CONSTRAINT_SCHEMA
+}
+
+/// What `verify compile` reads.
+pub fn authoring_schema() -> &'static str {
+    AUTHORING_SCHEMA
+}
+
+/// One line of what `verify ground` reads.
+pub fn claims_schema() -> &'static str {
+    CLAIMS_SCHEMA
 }
 
 pub fn operator_contract() -> &'static str {

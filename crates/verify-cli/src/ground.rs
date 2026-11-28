@@ -20,26 +20,70 @@ use crate::{
     witness::{self, WitnessInput},
 };
 
+/// The flags that only print a schema, so need none of the inputs.
+const DISCOVERY_FLAGS: [&str; 3] = ["schema", "describe", "input_schema"];
+
+/// Shown under `verify ground --help`: how to write the claims file.
+pub const AFTER_HELP: &str = r#"CLAIMS_JSONL holds one JSON object per line. Fields:
+  claim_id   required; unique in the file
+  source     required; the NAME of a --bind NAME=DOCUMENT
+  quote      required; text the document shows, as whole words and whole numbers
+  byte_span  optional {"start":N,"end":M}: the half-open raw byte range holding the quote
+  value      optional number; give it together with scale
+  scale      units, thousands, millions, percent or bps (also unit, thousand, k, million, m,
+             %, bp, basis_points; case does not matter)
+  unit       optional, only with value and scale: for example USD, $, percent or bps. It
+             passes only if the document states it on the number
+
+Example line:
+{"claim_id":"cash","source":"filing","quote":"USD 41.2 million","value":41.2,"scale":"millions","unit":"USD"}
+
+DOCUMENT is any UTF-8 text: plain text, Markdown, HTML or XML.
+Machine-readable: verify ground --schema. Rules for what passes: verify robot-docs guide."#;
+
 #[derive(Debug, Clone, Args)]
 pub struct GroundArgs {
-    #[arg(value_name = "CLAIMS_JSONL")]
-    pub claims: PathBuf,
-    #[arg(long = "bind", action = ArgAction::Append, value_name = "NAME=DOCUMENT", required = true)]
+    /// Claims to check: a JSONL file, one claim per line (fields below).
+    #[arg(value_name = "CLAIMS_JSONL", required_unless_present_any = DISCOVERY_FLAGS)]
+    pub claims: Option<PathBuf>,
+    /// A source document and the name claims use for it as `source`; repeatable. Any UTF-8
+    /// text: plain text, Markdown, HTML or XML.
+    #[arg(
+        long = "bind",
+        action = ArgAction::Append,
+        value_name = "NAME=DOCUMENT",
+        required_unless_present_any = DISCOVERY_FLAGS
+    )]
     pub binds: Vec<String>,
+    /// A lock.v0 lockfile pinning the bytes of the bound documents; repeatable.
     #[arg(
         long = "lock",
         action = ArgAction::Append,
         value_name = "LOCKFILE",
-        required = true
+        required_unless_present_any = DISCOVERY_FLAGS
     )]
     pub locks: Vec<PathBuf>,
+    /// Print the JSON Schema of one claims line (verify.claims.v1) and exit. `--schema` and
+    /// `--describe` do the same here.
+    #[arg(long = "input-schema")]
+    pub input_schema: bool,
+    /// Print the report as verify.report.v1 JSON.
     #[arg(long)]
     pub json: bool,
+    /// Do not append a witness record.
     #[arg(long)]
     pub no_witness: bool,
     /// Include raw quote and numeric evidence (default output is redacted).
     #[arg(long)]
     pub explicit: bool,
+}
+
+impl GroundArgs {
+    fn claims_path(&self) -> &Path {
+        self.claims
+            .as_deref()
+            .expect("clap requires CLAIMS_JSONL unless only a schema is printed")
+    }
 }
 
 pub fn execute(args: GroundArgs) -> RunCommandResult {
@@ -52,7 +96,7 @@ pub fn execute(args: GroundArgs) -> RunCommandResult {
         }
     };
 
-    let claims_hash = fs::read(&args.claims)
+    let claims_hash = fs::read(args.claims_path())
         .map(|bytes| crate::run::sha256_of_bytes(&bytes))
         .unwrap_or_else(|_| "sha256:unavailable".to_owned());
     let mut report = execute_inner(&args, &claims_hash).unwrap_or_else(|report| *report);
@@ -63,15 +107,15 @@ pub fn execute(args: GroundArgs) -> RunCommandResult {
 }
 
 fn execute_inner(args: &GroundArgs, claims_hash: &str) -> Result<VerifyReport, Box<VerifyReport>> {
-    let claims_bytes = fs::read(&args.claims).map_err(|error| {
+    let claims_bytes = fs::read(args.claims_path()).map_err(|error| {
         Box::new(refusal(
             claims_hash,
             RefusalCode::Io,
             format!(
                 "failed to read grounding claims file {}: {error}",
-                args.claims.display()
+                args.claims_path().display()
             ),
-            json!({ "path": args.claims.to_string_lossy() }),
+            json!({ "path": args.claims_path().to_string_lossy() }),
         ))
     })?;
     let claims = parse_claims_jsonl(&claims_bytes)
@@ -275,7 +319,7 @@ fn append_witness(args: &GroundArgs, result: &mut RunCommandResult) {
                 .collect(),
         ),
     );
-    let mut inputs = vec![WitnessInput::from_path(&args.claims)];
+    let mut inputs = vec![WitnessInput::from_path(args.claims_path())];
     inputs.extend(args.binds.iter().map(|bind| {
         WitnessInput::from_path(bind.split_once('=').map_or(bind.as_str(), |(_, path)| path))
     }));

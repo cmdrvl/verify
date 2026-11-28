@@ -40,7 +40,12 @@ enum Command {
     #[command(about = "Print agent-facing operational guidance")]
     RobotDocs(doctor::TopLevelRobotDocsArgs),
     Run(run::RunArgs),
+    #[command(about = "Compile authoring into a verify.constraint.v1 artifact")]
     Compile(compile::CompileArgs),
+    #[command(
+        about = "Check cited quotes and numbers against locked source documents",
+        after_help = ground::AFTER_HELP
+    )]
     Ground(ground::GroundArgs),
     Validate(validate::ValidateArgs),
     Witness(witness::WitnessArgs),
@@ -221,21 +226,37 @@ fn from_command(result: Result<(), String>) -> DispatchOutcome {
     }
 }
 
+fn document(text: &str) -> DispatchOutcome {
+    DispatchOutcome {
+        exit_code: 0,
+        stdout: Some(text.to_owned()),
+        stderr: None,
+    }
+}
+
+/// `ground` and `compile` describe what is authored for them. This is decided before the root
+/// `--schema` and `--describe`, which clap also sets when they follow a subcommand.
+fn subcommand_discovery(cli: &Cli) -> Option<&'static str> {
+    let asked = cli.schema || cli.describe;
+    match &cli.command {
+        Some(Command::Ground(args)) if asked || args.input_schema => Some(render::claims_schema()),
+        Some(Command::Compile(args)) if args.input_schema => Some(render::authoring_schema()),
+        Some(Command::Compile(args)) if asked || args.schema => Some(render::constraint_schema()),
+        _ => None,
+    }
+}
+
 fn dispatch(cli: Cli) -> DispatchOutcome {
+    if let Some(schema) = subcommand_discovery(&cli) {
+        return document(schema);
+    }
+
     if cli.schema {
-        return DispatchOutcome {
-            exit_code: 0,
-            stdout: Some(render::report_schema().to_owned()),
-            stderr: None,
-        };
+        return document(render::report_schema());
     }
 
     if cli.describe {
-        return DispatchOutcome {
-            exit_code: 0,
-            stdout: Some(render::operator_contract().to_owned()),
-            stderr: None,
-        };
+        return document(render::operator_contract());
     }
 
     if cli.robot_triage {

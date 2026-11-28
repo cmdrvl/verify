@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "verify.claims.v1",
+  "description": "One claim: one line of the JSONL file `verify ground` reads. Blank lines are ignored and an empty file refuses. Each claim cites text of one bound document, which may be any UTF-8 text: plain text, Markdown, HTML or XML (anything shaped like a tag is treated as markup).",
+  "type": "object",
+  "required": ["claim_id", "source", "quote"],
+  "properties": {
+    "claim_id": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Names the claim in the report. Must be unique in the file."
+    },
+    "source": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "The NAME of a --bind NAME=DOCUMENT."
+    },
+    "quote": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Text the document shows, as whole words and whole numbers. Whitespace is collapsed and HTML tags and entities are resolved before matching. Without byte_span it must occur exactly once."
+    },
+    "byte_span": {
+      "type": ["object", "null"],
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Half-open byte range of the raw document that holds the quote."
+    },
+    "value": {
+      "type": ["number", "null"],
+      "description": "The claimed number, in units of `scale`. Give `value` and `scale` together."
+    },
+    "scale": {
+      "type": ["string", "null"],
+      "enum": [
+        "units",
+        "unit",
+        "thousands",
+        "thousand",
+        "k",
+        "millions",
+        "million",
+        "m",
+        "percent",
+        "%",
+        "bps",
+        "bp",
+        "basis_points",
+        null
+      ],
+      "description": "The scale of `value`, matched without regard to case. A percent or bps claim matches only a percent or basis-point figure."
+    },
+    "unit": {
+      "type": ["string", "null"],
+      "description": "Optional, only with value and scale: a currency code such as USD, a currency sign such as $, or percent or bps. It passes only if the document states it on the number; a bare $ does not establish USD, and other units are never established."
+    }
+  },
+  "dependentRequired": {
+    "value": ["scale"],
+    "scale": ["value"],
+    "unit": ["value", "scale"]
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "claim_id": "cash",
+      "source": "filing",
+      "quote": "$41.2 million",
+      "value": 41.2,
+      "scale": "millions",
+      "unit": "$"
+    }
+  ]
+}

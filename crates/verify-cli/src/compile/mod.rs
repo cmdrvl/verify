@@ -8,18 +8,29 @@ pub mod query;
 
 #[derive(Debug, Clone, Args)]
 pub struct CompileArgs {
+    /// Authoring file: YAML or JSON portable rules, or a .sql query rule. See --input-schema
+    /// and `verify robot-docs guide`.
     #[arg(
         value_name = "AUTHORING",
-        required_unless_present = "schema",
+        required_unless_present_any = ["schema", "describe", "input_schema"],
         conflicts_with = "schema"
     )]
     pub authoring: Option<PathBuf>,
+    /// Write the compiled verify.constraint.v1 artifact here instead of stdout.
     #[arg(long = "out", alias = "output", conflicts_with_all = ["check", "schema"])]
     pub output: Option<PathBuf>,
+    /// Validate the authoring without writing anything.
     #[arg(long, conflicts_with = "schema")]
     pub check: bool,
+    /// Print the JSON Schema of the compiled artifact (verify.constraint.v1) and exit.
+    /// `--describe` does the same here.
     #[arg(long)]
     pub schema: bool,
+    /// Print the JSON Schema of the YAML or JSON authoring compile reads
+    /// (verify.authoring.v1) and exit.
+    #[arg(long = "input-schema")]
+    pub input_schema: bool,
+    /// Accepted for scripts; compile output is already JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -119,6 +130,7 @@ mod tests {
             output: None,
             check: true,
             schema: false,
+            input_schema: false,
             json: false,
         });
 
@@ -137,6 +149,7 @@ mod tests {
             output: None,
             check: true,
             schema: false,
+            input_schema: false,
             json: false,
         });
 
@@ -175,6 +188,7 @@ rules:
             output: Some(output.clone()),
             check: false,
             schema: false,
+            input_schema: false,
             json: false,
         });
 
@@ -208,6 +222,7 @@ rules:
                 output: Some(output.clone()),
                 check: false,
                 schema: false,
+                input_schema: false,
                 json: false,
             })
             .expect("binding-qualified fixture should compile");
