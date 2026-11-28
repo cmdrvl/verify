@@ -1229,10 +1229,13 @@ fn unit_established(claimed: &str, scale: Scale, currencies: &[Currency]) -> boo
     };
     let dollar = matches!(code.as_str(), "USD" | "CAD" | "AUD" | "HKD" | "NZD" | "SGD");
     let named = |found: &Currency| matches!(found, Currency::Code(name) if *name == code);
-    currencies.iter().any(named)
-        && currencies
-            .iter()
-            .all(|found| named(found) || (dollar && *found == Currency::Dollar))
+    // A bare `$`, or one whose spaced prefix points to the same code, may accompany it.
+    let agrees = |found: &Currency| match found {
+        Currency::Dollar => dollar,
+        Currency::Prefixed(name) => *name == code,
+        _ => named(found),
+    };
+    currencies.iter().any(named) && currencies.iter().all(agrees)
 }
 
 /// Why this claim does not hold for the numbers in its matched quote, or `None`.

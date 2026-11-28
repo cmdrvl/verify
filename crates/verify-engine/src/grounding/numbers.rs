@@ -16,6 +16,10 @@ pub(super) enum Currency {
     Dollar,
     /// A bare `¥`: yen or yuan.
     Yen,
+    /// A `$` with a prefix written apart from it (`CA $`), naming the code the prefix points
+    /// to. The words in front of a `$` may be prose, so alone it establishes no unit, not even
+    /// a bare dollar; it may only accompany an explicit marker of that same code.
+    Prefixed(&'static str),
     /// A currency marker this module cannot name.
     Other,
 }
@@ -386,15 +390,71 @@ fn marker_start(document: &Document<'_>, symbol: usize) -> usize {
     }
 }
 
-/// Byte ranges of the currency markers of more than one character, in document order: letters
-/// joined to a symbol, and currency names written after a number. A quote may not start or end
+/// Prefixes that belong to a `$` even when written apart from it, with the code each points
+/// to. Case matters ("told us $5" is not one). Single letters (`C $`) are left out: "Class A
+/// $5 million" would be caught.
+const SPACED_PREFIXES: [(&str, &str); 7] = [
+    ("US", "USD"),
+    ("U.S.", "USD"),
+    ("CA", "CAD"),
+    ("Cdn", "CAD"),
+    ("HK", "HKD"),
+    ("NZ", "NZD"),
+    ("AU", "AUD"),
+];
+
+/// A prefix one space before the `$` at `symbol`, as its own word: where it starts, and its
+/// code. Line breaks, entities and tags have all become that one space by now.
+fn spaced_prefix(document: &Document<'_>, symbol: usize) -> Option<(usize, &'static str)> {
+    if document.at(symbol) != Some('$') || symbol == 0 || document.chars[symbol - 1] != ' ' {
+        return None;
+    }
+    let end = symbol - 1;
+    let mut start = end;
+    while start > 0
+        && (document.chars[start - 1].is_ascii_alphabetic() || document.chars[start - 1] == '.')
+    {
+        start -= 1;
+    }
+    // An ellipsis in front of the prefix is not part of it.
+    while start < end && document.chars[start] == '.' {
+        start += 1;
+    }
+    if start > 0 && document.chars[start - 1].is_alphanumeric() {
+        return None;
+    }
+    let word = document.slice(start, end);
+    SPACED_PREFIXES
+        .iter()
+        .find(|(prefix, _)| *prefix == word)
+        .map(|(_, code)| (start, *code))
+}
+
+/// The currency marker ending in the symbol at `symbol`: where it starts and what it names.
+fn marker_at(document: &Document<'_>, symbol: usize) -> (usize, Currency) {
+    if let Some((start, code)) = spaced_prefix(document, symbol) {
+        return (start, Currency::Prefixed(code));
+    }
+    let start = marker_start(document, symbol);
+    let letters = document.slice(start, symbol).to_ascii_uppercase();
+    // A dotted prefix (`Cdn.$`) is a marker this module cannot name.
+    let currency = if letters.contains('.') {
+        Currency::Other
+    } else {
+        symbol_currency(&letters, document.chars[symbol])
+    };
+    (start, currency)
+}
+
+/// Byte ranges of the currency markers of more than one character, in document order: a symbol
+/// with its prefix, and currency names written after a number. A quote may not start or end
 /// inside one.
 pub(super) fn currency_markers(text: &str, tokens: &[NumberToken]) -> Vec<(usize, usize)> {
     let document = Document::new(text);
     let mut markers: Vec<(usize, usize)> = (0..document.chars.len())
         .filter(|index| is_currency_symbol(document.chars[*index]))
         .filter_map(|symbol| {
-            let start = marker_start(&document, symbol);
+            let (start, _) = marker_at(&document, symbol);
             (start < symbol).then(|| (document.offset(start), document.offset(symbol + 1)))
         })
         .chain(tokens.iter().filter_map(|number| number.trailing_marker))
@@ -417,14 +477,8 @@ fn prefix(document: &Document<'_>, core: usize) -> Prefix {
         }
         let character = document.chars[end - 1];
         if is_currency_symbol(character) {
-            let start = marker_start(document, end - 1);
-            let letters = document.slice(start, end - 1).to_ascii_uppercase();
-            // A dotted prefix (`Cdn.$`) is a marker this module cannot name.
-            found.currencies.push(if letters.contains('.') {
-                Currency::Other
-            } else {
-                symbol_currency(&letters, character)
-            });
+            let (start, currency) = marker_at(document, end - 1);
+            found.currencies.push(currency);
             cursor = start;
         } else if character.is_alphabetic() {
             let (word, start) = document.word_before(end);
