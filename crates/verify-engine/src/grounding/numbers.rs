@@ -393,11 +393,13 @@ fn marker_start(document: &Document<'_>, symbol: usize) -> usize {
 /// Prefixes that belong to a `$` even when written apart from it, with the code each points
 /// to. Case matters ("told us $5" is not one). Single letters (`C $`) are left out: "Class A
 /// $5 million" would be caught.
-const SPACED_PREFIXES: [(&str, &str); 7] = [
+const SPACED_PREFIXES: [(&str, &str); 9] = [
     ("US", "USD"),
     ("U.S.", "USD"),
     ("CA", "CAD"),
     ("Cdn", "CAD"),
+    ("Cdn.", "CAD"),
+    ("CDN", "CAD"),
     ("HK", "HKD"),
     ("NZ", "NZD"),
     ("AU", "AUD"),
