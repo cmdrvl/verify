@@ -613,6 +613,8 @@ br close <id> --reason "Completed"
 br sync --flush-only              # non-invasive; stage .beads/ in normal git workflow
 ```
 
+For the full toolchain guide, see the [Agent Operator Guide](https://github.com/cmdrvl/.github/blob/main/profile/AGENT_PROMPT.md). Run `verify --describe` for this tool's machine-readable contract.
+
 ---
 
 *`verify` is part of the open-source toolchain from the [CMD+RVL](https://cmdrvl.com) lineage and AI enablement practice. MIT-licensed. Contributions welcome from any practice or stack.*
