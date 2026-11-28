@@ -76,6 +76,71 @@ fn compile_discovery_emits_the_compile_schemas() {
 }
 
 #[test]
+fn discovery_flags_work_before_the_subcommand() {
+    for flag in ["--schema", "--describe"] {
+        for subcommand in ["ground", "compile"] {
+            assert_eq!(
+                stdout(&[flag, subcommand]),
+                stdout(&[subcommand, flag]),
+                "{flag} {subcommand}"
+            );
+        }
+        assert_eq!(json(&[flag, "ground"])["title"], "verify.claims.v1");
+        assert_eq!(json(&[flag, "compile"])["title"], "verify.constraint.v1");
+    }
+}
+
+#[test]
+fn a_leading_discovery_flag_does_not_hide_an_argument_error() {
+    for args in [
+        &["--schema", "compile", "--no-such-flag"][..],
+        &["--schema", "ground", "--no-such-flag"],
+        &["--schema", "compile", "--check"],
+    ] {
+        let output = verify(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+}
+
+/// What `--help` says about `flag`: the rest of its line and the lines under it.
+fn help_for(help: &str, flag: &str) -> String {
+    let mut lines = help.lines().skip_while(|line| {
+        let line = line.trim_start();
+        line != flag && !line.starts_with(&format!("{flag} "))
+    });
+    let first = lines.next().expect("the flag is listed").trim_start();
+    let mut said = first[flag.len()..].trim().to_owned();
+    for line in lines.map(str::trim) {
+        if line.starts_with('-') || line.ends_with(':') && !line.contains(' ') {
+            break;
+        }
+        said.push_str(line);
+    }
+    said
+}
+
+#[test]
+fn help_describes_schema_and_describe() {
+    for args in [
+        &["--help"][..],
+        &["-h"],
+        &["ground", "--help"],
+        &["ground", "-h"],
+        &["compile", "--help"],
+        &["run", "--help"],
+    ] {
+        let help = stdout(args);
+        for flag in ["--schema", "--describe"] {
+            assert!(
+                !help_for(&help, flag).is_empty(),
+                "{args:?}: {flag} has no description\n{help}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_root_flags_are_unchanged() {
     assert_eq!(json(&["--schema"])["title"], "verify.report.v1");
     assert_eq!(json(&["--describe"])["schema_version"], "operator.v1");

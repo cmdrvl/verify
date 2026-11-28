@@ -25,8 +25,12 @@ use clap::{ArgAction, Parser, Subcommand};
 struct Cli {
     #[arg(long = "robot-triage", action = ArgAction::SetTrue)]
     robot_triage: bool,
+    /// Print a JSON Schema and exit: with `ground`, of one claims line; with `compile`, of the
+    /// compiled artifact; otherwise of the report (verify.report.v1)
     #[arg(long, action = ArgAction::SetTrue, global = true)]
     schema: bool,
+    /// Print the operator contract (operator.json) and exit; with `ground` or `compile`, the
+    /// same as `--schema` there
     #[arg(long, action = ArgAction::SetTrue, global = true)]
     describe: bool,
     #[command(subcommand)]
@@ -66,7 +70,36 @@ fn main() -> ExitCode {
     if let Some(message) = typo_hint(&args) {
         return emit(refusal_outcome(message));
     }
-    emit(dispatch(Cli::parse_from(normalize_shortcut_args(args))))
+    emit(dispatch(parse_cli(normalize_shortcut_args(args))))
+}
+
+/// Parse the command line. Clap checks `ground`'s and `compile`'s required arguments without
+/// seeing a `--schema` or `--describe` typed before the subcommand, so a command it rejects is
+/// read once more with those flags after it. If that fails too, the first error stands.
+fn parse_cli(args: Vec<OsString>) -> Cli {
+    Cli::try_parse_from(&args).unwrap_or_else(|error| {
+        discovery_flags_moved(&args)
+            .and_then(|moved| Cli::try_parse_from(moved).ok())
+            .unwrap_or_else(|| error.exit())
+    })
+}
+
+/// `verify --schema compile ...` as `verify compile --schema ...`, when only `--schema` and
+/// `--describe` stand before `ground` or `compile`.
+fn discovery_flags_moved(args: &[OsString]) -> Option<Vec<OsString>> {
+    let leading = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| matches!(arg.to_str(), Some("--schema" | "--describe")))
+        .count();
+    let subcommand = args.get(leading + 1)?;
+    if leading == 0 || !matches!(subcommand.to_str(), Some("ground" | "compile")) {
+        return None;
+    }
+    let mut moved = vec![args[0].clone(), subcommand.clone()];
+    moved.extend_from_slice(&args[1..=leading]);
+    moved.extend_from_slice(&args[leading + 2..]);
+    Some(moved)
 }
 
 /// Subcommands a first positional argument can be a typo of.
