@@ -2740,7 +2740,6 @@ fn repro_distinct_jsonl_strings_are_not_equal_across_bindings() {
 }
 
 #[test]
-#[ignore = "bd-7k7: binding-qualified keys are matched after rounding to DOUBLE"]
 fn repro_wide_integer_keys_do_not_match_a_neighbour() {
     let directory = tempdir().expect("scratch");
     let key_table = |key: &str| Table {
@@ -2760,6 +2759,179 @@ fn repro_wide_integer_keys_do_not_match_a_neighbour() {
         &[("input", &current), ("twin", &prior)],
     );
     assert_eq!(essence_text(&report), "E_KEY_UNMATCHED");
+}
+
+// ---------------------------------------------------------------------------
+// Binding-qualified key identity (bd-7k7)
+// ---------------------------------------------------------------------------
+
+/// A parquet file with the given column definitions and `VALUES` rows.
+fn sql_parquet(path: &Path, columns: &str, rows: &str) {
+    Connection::open_in_memory()
+        .expect("DuckDB")
+        .execute_batch(&format!(
+            "CREATE TABLE t ({columns}); INSERT INTO t VALUES {rows}; COPY t TO {} (FORMAT PARQUET);",
+            sql_string(&path.to_string_lossy())
+        ))
+        .expect("parquet written");
+}
+
+/// `eq(v, twin.v)` over two tables keyed on `id`; each is `(id type, rows of (id, v))`.
+fn keyed_report(current: (&str, &str), prior: (&str, &str)) -> Value {
+    let directory = tempdir().expect("scratch");
+    let input = directory.path().join("input.parquet");
+    let twin = directory.path().join("twin.parquet");
+    sql_parquet(&input, &format!("id {}, v BIGINT", current.0), current.1);
+    sql_parquet(&twin, &format!("id {}, v BIGINT", prior.0), prior.1);
+    let constraints = twin_artifact(&json!({
+        "eq": [{ "column": "v" }, { "binding": "twin", "column": "v" }]
+    }));
+    cli_report(
+        directory.path(),
+        &constraints,
+        &[("input", &input), ("twin", &twin)],
+    )
+}
+
+/// Different keys that share one f64 never join, whatever their column types.
+#[test]
+fn distinct_keys_sharing_a_double_are_unmatched() {
+    let cases = [
+        (
+            ("DECIMAL(20,2)", "(9007199254740993.00, 1)"),
+            ("DECIMAL(20,2)", "(9007199254740992.00, 1)"),
+        ),
+        (
+            ("DECIMAL(22,2)", "(123456789012345678.01, 1)"),
+            ("DECIMAL(22,2)", "(123456789012345678.02, 1)"),
+        ),
+        (
+            ("BIGINT", "(9007199254740993, 1)"),
+            ("DECIMAL(20,2)", "(9007199254740992.00, 1)"),
+        ),
+        // From 2^53 up a DOUBLE may be a rounded neighbour of an integer.
+        (
+            ("BIGINT", "(9007199254740993, 1)"),
+            ("DOUBLE", "(9007199254740992, 1)"),
+        ),
+        (
+            ("UBIGINT", "(18446744073709551615, 1)"),
+            ("UBIGINT", "(18446744073709551614, 1)"),
+        ),
+        (
+            ("DECIMAL(20,19)", "(0.1000000000000000001, 1)"),
+            ("DOUBLE", "(0.1, 1)"),
+        ),
+    ];
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|(current, prior)| {
+            let outcome = essence_text(&keyed_report(*current, *prior));
+            (outcome != "E_KEY_UNMATCHED").then(|| format!("{current:?} / {prior:?}: {outcome}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Neighbouring keys inside one binding are two keys, and each row meets its own counterpart.
+/// The second case plants swapped values: only a row-for-row join reports both.
+#[test]
+fn neighbouring_wide_keys_each_meet_their_own_row() {
+    const CURRENT: &str = "(9007199254740992, 1), (9007199254740993, 2)";
+    // Not HUGEINT: DuckDB writes it to parquet as DOUBLE, so these two keys become one.
+    for twin_type in ["BIGINT", "UBIGINT", "DECIMAL(20,0)", "DECIMAL(20,2)"] {
+        let same = keyed_report(
+            ("BIGINT", CURRENT),
+            (twin_type, "(9007199254740993, 2), (9007199254740992, 1)"),
+        );
+        assert_eq!(essence_text(&same), "PASS", "{twin_type}: {same}");
+
+        let swapped = keyed_report(
+            ("BIGINT", CURRENT),
+            (twin_type, "(9007199254740992, 2), (9007199254740993, 1)"),
+        );
+        assert_eq!(essence_text(&swapped), "FAIL", "{twin_type}: {swapped}");
+        assert_eq!(swapped["results"][0]["violation_count"], 2, "{swapped}");
+    }
+    let decimals = keyed_report(
+        (
+            "DECIMAL(22,2)",
+            "(123456789012345678.01, 1), (123456789012345678.02, 2)",
+        ),
+        (
+            "DECIMAL(22,2)",
+            "(123456789012345678.02, 2), (123456789012345678.01, 1)",
+        ),
+    );
+    assert_eq!(essence_text(&decimals), "PASS", "{decimals}");
+}
+
+/// Equal numbers of different column types stay one key.
+#[test]
+fn equal_keys_of_different_numeric_types_still_join() {
+    let cases = [
+        (
+            ("BIGINT", "(1, 1), (2, 2)"),
+            ("DOUBLE", "(2.0, 2), (1.0, 1)"),
+        ),
+        (("BIGINT", "(0, 1)"), ("DOUBLE", "(-0.0, 1)")),
+        (("DECIMAL(10,2)", "(1.50, 1)"), ("DOUBLE", "(1.5, 1)")),
+        (
+            ("DECIMAL(10,2)", "(0.10, 1)"),
+            ("DECIMAL(10,1)", "(0.1, 1)"),
+        ),
+        (("DOUBLE", "(0.1, 1)"), ("DECIMAL(10,1)", "(0.1, 1)")),
+        (("INTEGER", "(7, 1)"), ("DECIMAL(10,2)", "(7.00, 1)")),
+        (
+            ("UBIGINT", "(9007199254740993, 1)"),
+            ("BIGINT", "(9007199254740993, 1)"),
+        ),
+        (
+            ("DOUBLE", "(9007199254740992, 1)"),
+            ("DOUBLE", "(9007199254740992, 1)"),
+        ),
+    ];
+    for (current, prior) in cases {
+        let report = keyed_report(current, prior);
+        assert_eq!(
+            essence_text(&report),
+            "PASS",
+            "{current:?} / {prior:?}: {report}"
+        );
+    }
+}
+
+/// The report's text for a failed temporal value comes from the failing row, not from the
+/// row of a neighbouring key.
+#[test]
+fn a_failed_temporal_value_is_read_from_its_own_wide_key_row() {
+    let directory = tempdir().expect("scratch");
+    let input = directory.path().join("input.parquet");
+    let twin = directory.path().join("twin.parquet");
+    sql_parquet(
+        &input,
+        "id BIGINT, v DATE",
+        "(9007199254740992, '2024-01-01'), (9007199254740993, '2024-02-02')",
+    );
+    sql_parquet(
+        &twin,
+        "id BIGINT, v DATE",
+        "(9007199254740992, '2024-01-01'), (9007199254740993, '2024-03-03')",
+    );
+    let constraints = twin_artifact(&json!({
+        "eq": [{ "column": "v" }, { "binding": "twin", "column": "v" }]
+    }));
+    let report = cli_report(
+        directory.path(),
+        &constraints,
+        &[("input", &input), ("twin", &twin)],
+    );
+
+    assert_eq!(essence_text(&report), "FAIL", "{report}");
+    assert_eq!(report["results"][0]["violation_count"], 1, "{report}");
+    let affected = &report["results"][0]["affected"][0];
+    assert_eq!(affected["key"]["id"], json!(9_007_199_254_740_993_i64));
+    assert_eq!(affected["value"], "2024-02-02");
 }
 
 #[test]
