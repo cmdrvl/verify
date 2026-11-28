@@ -141,8 +141,9 @@ fn every_candidate_must_agree() {
         &[&[("d/loans.csv", ZEROS), ("d/loans.csv", &good)]],
         // The same bytes recorded under two algorithms, one of them wrong.
         &[&[("loans.csv", &good), ("loans.csv", BLAKE3_ZEROS)]],
-        // Leading `./` does not make a second path.
-        &[&[("./loans.csv", &good), ("loans.csv", ZEROS)]],
+        // Leading `./` does not make a second path. If it did, only the good plain entry would
+        // be a candidate and the input would pass.
+        &[&[("./loans.csv", ZEROS), ("loans.csv", &good)]],
         // By file name, across two locks.
         &[&[("d/loans.csv", &good)], &[("d/loans.csv", ZEROS)]],
     ];
