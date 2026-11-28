@@ -481,7 +481,7 @@ fn top_level_robot_docs() -> String {
         "Authoring claims.jsonl for `ground` (schema: `verify ground --schema`):",
         "- One JSON object per line. `claim_id` (required, unique), `source` (required, the NAME of a `--bind NAME=DOCUMENT`) and `quote` (required, text the document shows).",
         "- Optional `byte_span`: {\"start\":N,\"end\":M}, the half-open raw byte range holding the quote.",
-        "- A numeric claim adds `value` and `scale` together, and may add `unit`. `scale` is one of units, thousands, millions, percent, bps (also unit, thousand, k, million, m, %, bp, basis_points; case does not matter).",
+        "- A numeric claim adds `value` and `scale` together, and may add `unit`. `scale` is one of units, thousands, millions, billions, trillions, percent, bps (also unit, thousand, k, million, m, billion, bn, trillion, tn, trn, %, bp, basis_points; case does not matter; a lone b or t is not accepted). In a document, `tn` means trillions only next to a currency, and a lone M, B or T binds to nothing.",
         "- Documents are any UTF-8 text: plain text, Markdown, HTML or XML. Anything shaped like a tag is treated as markup.",
         "- Quote whole words and whole numbers, exactly one number for a numeric claim, and only as much text as that number needs. Without `byte_span` the quote must occur exactly once.",
         "- A `unit` passes only if the document states it on the number: a code such as USD does, a bare $ does not establish USD (claim \"unit\":\"$\").",

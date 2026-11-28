@@ -2050,3 +2050,369 @@ fn ordinary_words_before_a_dollar_sign_are_not_markers() {
     }
     assert_all_pass(&cases);
 }
+
+// ---- bd-xas: billions and trillions ---------------------------------------------------------
+
+/// A case whose document is the whole quoted amount in a sentence.
+fn amount(quote: &'static str, numeric: Numeric) -> Case {
+    let document = leak(format!("The fund reported {quote} today."));
+    let name = leak(format!("{quote} claimed {numeric:?}"));
+    case(name, document, quote, numeric)
+}
+
+#[test]
+fn billions_and_trillions_pass_in_any_equivalent_scale() {
+    let mut cases = Vec::new();
+    for quote in [
+        "$1.3 billion",
+        "$1.3 billions",
+        "$1.3billion",
+        "$1.3bn",
+        "$1.3 bn",
+        "1.3 billion",
+        "1.3bn",
+        "1.3 BN",
+        "$1.3 Billion",
+    ] {
+        cases.push(amount(quote, n("1.3", "billions")));
+        cases.push(amount(quote, n("1300", "millions")));
+        cases.push(amount(quote, n("1300000", "thousands")));
+        cases.push(amount(quote, n("1300000000", "units")));
+        cases.push(amount(quote, n("0.0013", "trillions")));
+    }
+    for quote in [
+        "$2.4 trillion",
+        "$2.4 trillions",
+        "2.4 trillion",
+        "$2.4tn",
+        "$2.4 tn",
+        "$2.4trn",
+        "2.4 trn",
+    ] {
+        cases.push(amount(quote, n("2.4", "trillions")));
+        cases.push(amount(quote, n("2400", "billions")));
+        cases.push(amount(quote, n("2400000", "millions")));
+        cases.push(amount(quote, n("2400000000000", "units")));
+    }
+    // Every spelling of the claim's own scale.
+    for scale in ["billions", "billion", "bn", "BN", "Billions"] {
+        cases.push(amount("$1.3 billion", n("1.3", scale)));
+    }
+    for scale in ["trillions", "trillion", "tn", "trn", "TRN"] {
+        cases.push(amount("$2.4 trillion", n("2.4", scale)));
+    }
+    cases.extend([
+        case(
+            "negative",
+            "The change was -$1.3 billion.",
+            "-$1.3 billion",
+            n("-1.3", "billions"),
+        ),
+        case(
+            "hyphenated",
+            "A 5-billion-dollar fund closed.",
+            "A 5-billion-dollar fund",
+            n("5", "billions"),
+        ),
+        case(
+            "bare dollar unit",
+            "AUM was $1.3 billion.",
+            "$1.3 billion",
+            u("1.3", "billions", "$"),
+        ),
+        case(
+            "code unit",
+            "AUM was USD 1.3bn.",
+            "USD 1.3bn",
+            u("1300", "millions", "USD"),
+        ),
+        case(
+            "attached US$",
+            "AUM was US$1.3 billion.",
+            "US$1.3 billion",
+            u("1.3", "billions", "USD"),
+        ),
+        case(
+            "currency name after",
+            "Cap was 2.4 trillion U.S. dollars.",
+            "2.4 trillion U.S. dollars",
+            u("2.4", "trillions", "USD"),
+        ),
+        case(
+            "euro",
+            "Cap was \u{20ac}2.4tn.",
+            "\u{20ac}2.4tn",
+            u("2.4", "trillions", "EUR"),
+        ),
+        case(
+            "tags join a styled amount",
+            "<p><b>$1.3</b> <span>billion</span></p>",
+            "$1.3 billion",
+            n("1.3", "billions"),
+        ),
+        case(
+            "exact decimals",
+            "It was $1.000000001 billion.",
+            "$1.000000001 billion",
+            n("1000000001", "units"),
+        ),
+        case(
+            "count with billion",
+            "There are 8 billion people.",
+            "8 billion people",
+            n("8", "billions"),
+        ),
+        case(
+            "a billionaire is not a scale",
+            "We met 5 billionaires.",
+            "5 billionaires",
+            n("5", "units"),
+        ),
+    ]);
+    assert_all_pass(&cases);
+}
+
+#[test]
+fn billion_and_trillion_rules_stay_fail_closed() {
+    let mut cases = Vec::new();
+    for quote in ["$1.3 billion", "$1.3bn", "$2.4 trillion", "$2.4tn"] {
+        let digits = if quote.contains("1.3") { "1.3" } else { "2.4" };
+        for scale in ["units", "thousands", "millions"] {
+            cases.push(amount(quote, n(digits, scale)));
+        }
+    }
+    cases.extend([
+        amount("$1.3 billion", n("1.3", "trillions")),
+        amount("$2.4 trillion", n("2.4", "billions")),
+        amount("$1.3 billion", n("1.300000001", "billions")),
+        // A quote may not drop the scale word.
+        case(
+            "cut the scale",
+            "AUM was $1.3 billion.",
+            "$1.3",
+            n("1.3", "units"),
+        ),
+        case(
+            "cut the scale, quote only",
+            "AUM was $1.3 billion.",
+            "AUM was $1.3",
+            None,
+        ),
+        case(
+            "cut inside the scale",
+            "AUM was $1.3 billion.",
+            "$1.3 b",
+            None,
+        ),
+        case(
+            "cut the attached scale",
+            "AUM was $2.4tn.",
+            "$2.4",
+            n("2.4", "units"),
+        ),
+        // A lone B or T names nothing for certain.
+        amount("$1.3B", n("1.3", "billions")),
+        amount("$1.3 B", n("1.3", "billions")),
+        amount("1.3b", n("1.3", "billions")),
+        amount("$2.4T", n("2.4", "trillions")),
+        amount("$2.4 T", n("2.4", "trillions")),
+        // Without a currency, tn may be tonnes.
+        amount("5 tn", n("5", "trillions")),
+        amount("5tn", n("5", "trillions")),
+        amount("5 tn", n("5", "units")),
+        // Two magnitudes, or a magnitude past a currency.
+        case(
+            "thousand billion",
+            "It was 5 thousand billion.",
+            "5 thousand billion",
+            n("5", "thousands"),
+        ),
+        case(
+            "billion million",
+            "It was 5 billion million.",
+            "5 billion million",
+            n("5", "billions"),
+        ),
+        case(
+            "billion trillion",
+            "It was 5 billion trillion.",
+            "5 billion trillion",
+            n("5", "billions"),
+        ),
+        case(
+            "hundred billion",
+            "It was 5 hundred billion.",
+            "5 hundred billion",
+            n("5", "billions"),
+        ),
+        case(
+            "million bn",
+            "It was 5 million bn.",
+            "5 million bn",
+            n("5", "millions"),
+        ),
+        case(
+            "thousand trn",
+            "It was $5 thousand trn.",
+            "$5 thousand trn",
+            n("5", "thousands"),
+        ),
+        case(
+            "currency before the scale",
+            "Debt was 5 USD billion.",
+            "5 USD billion",
+            n("5", "units"),
+        ),
+        // A scale kept from the digits by a mark, a footnote or another element.
+        case(
+            "asterisk",
+            "Cash was $41.2* billion.",
+            "$41.2",
+            n("41.2", "units"),
+        ),
+        case(
+            "bracketed footnote",
+            "Cash was $41.2 [1] trillion.",
+            "$41.2",
+            n("41.2", "units"),
+        ),
+        case(
+            "dash",
+            "A 5\u{2013}billion fund closed.",
+            "A 5",
+            n("5", "units"),
+        ),
+        case(
+            "sup footnote takes the scale",
+            "<p>$1.3<sup>1</sup> billion</p>",
+            "1 billion",
+            n("1", "billions"),
+        ),
+        case(
+            "next cell",
+            "<tr><td>5</td><td>billion served</td></tr>",
+            "5 billion",
+            n("5", "billions"),
+        ),
+        // Ranges and lists that share a scale.
+        case(
+            "range low end",
+            "Guidance is 10 to 20 billion.",
+            "10",
+            n("10", "units"),
+        ),
+        case(
+            "list first",
+            "Sales were 1.2, 1.3 and 1.5 trillion.",
+            "Sales were 1.2",
+            n("1.2", "units"),
+        ),
+        case(
+            "dashed range",
+            "Guidance is $10-$20 billion.",
+            "$10",
+            n("10", "units"),
+        ),
+        // Signs that cannot be established.
+        case(
+            "parentheses",
+            "Net was (1.3) billion.",
+            "(1.3) billion",
+            n("1.3", "billions"),
+        ),
+        case(
+            "minus cut",
+            "The change was -1.3 billion.",
+            "1.3 billion",
+            n("1.3", "billions"),
+        ),
+        // A document-wide scale leaves bare numbers unbound.
+        case(
+            "in billions",
+            "Amounts in billions. Loans 12 branches.",
+            "12 branches",
+            n("12", "units"),
+        ),
+        case(
+            "in trillions",
+            "<p>(in trillions)</p><p>Cash 412</p>",
+            "Cash 412",
+            n("412", "units"),
+        ),
+        case(
+            "millions of the header word trillions",
+            "Trillions of dollars\nCash 412",
+            "Cash 412",
+            n("412", "units"),
+        ),
+        case(
+            "sterling bn header",
+            "<p>Figures in \u{a3}bn</p><p>Cash 412</p>",
+            "Cash 412",
+            n("412", "units"),
+        ),
+        case(
+            "dollar tn header",
+            "<p>Assets ($tn)</p><p>Cash 412</p>",
+            "Cash 412",
+            n("412", "units"),
+        ),
+        // Other languages and long-scale texts.
+        case(
+            "milliards",
+            "Es waren 5 milliards.",
+            "5 milliards",
+            n("5", "billions"),
+        ),
+        case(
+            "german plural",
+            "Es waren 5 Billionen.",
+            "5 Billionen",
+            n("5", "billions"),
+        ),
+        case(
+            "german plural as units",
+            "Es waren 5 Billionen.",
+            "5 Billionen",
+            n("5", "units"),
+        ),
+        case(
+            "spanish plural",
+            "Fueron 5 billones.",
+            "5 billones",
+            n("5", "units"),
+        ),
+        case(
+            "spanish singular",
+            "Fue 1 bill\u{f3}n.",
+            "1 bill\u{f3}n",
+            n("1", "units"),
+        ),
+        case(
+            "long scale beside Milliarden",
+            "Es waren 2 Milliarden und dann 1 Billion.",
+            "dann 1 Billion",
+            n("1", "billions"),
+        ),
+        // Overflow of the exact arithmetic.
+        case(
+            "document beyond the range",
+            "It was 99999999999999999999999999999999 trillion.",
+            "99999999999999999999999999999999 trillion",
+            n("1", "trillions"),
+        ),
+    ]);
+    assert_none_pass(&cases);
+}
+
+#[test]
+fn ambiguous_claim_scales_and_overflow_are_refused() {
+    for scale in ["b", "t", "B", "T", "bil", "mrd"] {
+        let line = format!(
+            r#"{{"claim_id":"c","source":"filing","quote":"x","value":1,"scale":"{scale}"}}"#
+        );
+        assert!(parse_claims_jsonl(line.as_bytes()).is_err(), "{scale}");
+    }
+    let line = r#"{"claim_id":"c","source":"filing","quote":"x","value":99999999999999999999999999999,"scale":"trillions"}"#;
+    assert!(parse_claims_jsonl(line.as_bytes()).is_err());
+}

@@ -240,7 +240,7 @@
           "quote": "required string, text the document shows, as whole words and whole numbers",
           "byte_span": "optional {\"start\":N,\"end\":M}, the half-open raw byte range holding the quote",
           "value": "optional number, given together with scale",
-          "scale": "units, thousands, millions, percent or bps",
+          "scale": "units, thousands, millions, billions, trillions, percent or bps",
           "unit": "optional, only with value and scale; passes only if the document states it on the number"
         },
         "scale_values": [
@@ -252,6 +252,13 @@
           "millions",
           "million",
           "m",
+          "billions",
+          "billion",
+          "bn",
+          "trillions",
+          "trillion",
+          "tn",
+          "trn",
           "percent",
           "%",
           "bps",

@@ -178,6 +178,8 @@ pub enum Scale {
     Units,
     Thousands,
     Millions,
+    Billions,
+    Trillions,
     Percent,
     Bps,
 }
@@ -188,6 +190,9 @@ impl Scale {
             "units" | "unit" => Some(Self::Units),
             "thousands" | "thousand" | "k" => Some(Self::Thousands),
             "millions" | "million" | "m" => Some(Self::Millions),
+            // No lone `b` or `t`: either may mean something else.
+            "billions" | "billion" | "bn" => Some(Self::Billions),
+            "trillions" | "trillion" | "tn" | "trn" => Some(Self::Trillions),
             "percent" | "%" => Some(Self::Percent),
             "bps" | "bp" | "basis_points" => Some(Self::Bps),
             _ => None,
@@ -199,6 +204,8 @@ impl Scale {
             Self::Units => Some(value),
             Self::Thousands => value.multiply(1_000),
             Self::Millions => value.multiply(1_000_000),
+            Self::Billions => value.multiply(1_000_000_000),
+            Self::Trillions => value.multiply(1_000_000_000_000),
             Self::Percent => value.divide_power_of_ten(2),
             Self::Bps => value.divide_power_of_ten(4),
         }
@@ -209,6 +216,8 @@ impl Scale {
             Self::Units => "units",
             Self::Thousands => "thousands",
             Self::Millions => "millions",
+            Self::Billions => "billions",
+            Self::Trillions => "trillions",
             Self::Percent => "percent",
             Self::Bps => "bps",
         }
@@ -367,7 +376,9 @@ pub fn parse_claims_jsonl(input: &[u8]) -> Result<Vec<GroundingClaim>, Grounding
             (Some(value), Some(scale)) => {
                 let scale = Scale::parse(&scale).ok_or_else(|| GroundingError::InvalidClaim {
                     line,
-                    detail: "scale must be units, thousands, millions, percent, or bps".to_owned(),
+                    detail:
+                        "scale must be units, thousands, millions, billions, trillions, percent, or bps"
+                            .to_owned(),
                 })?;
                 let target = Decimal::parse(&value.to_string()).ok_or_else(|| {
                     GroundingError::InvalidClaim {

@@ -89,6 +89,32 @@ fn assert_unit_is_not_established(dir: &TempDir, document: &Path, lock: &Path, c
     assert!(stdout.contains("E_UNIT_NOT_ESTABLISHED"), "{stdout}");
 }
 
+/// bd-xas, end to end: a figure in billions passes in any equivalent scale and not in
+/// another one.
+#[test]
+fn a_figure_in_billions_grounds_in_equivalent_scales_only() {
+    let dir = TempDir::new().expect("scratch directory");
+    let bytes = b"AUM was $1.3 billion and fees were minor.\n".to_vec();
+    let document = dir.path().join("aum.txt");
+    fs::write(&document, &bytes).expect("document writes");
+    let lock = lock_file(&dir, &document, sha256(&bytes));
+    let claim = |value: u32, scale: &str| {
+        json!({
+            "claim_id": "aum", "source": "filing", "quote": "$1.3 billion",
+            "value": value, "scale": scale, "unit": "$"
+        })
+    };
+
+    let passing = claims_file(&dir, "millions.jsonl", &[claim(1300, "millions")]);
+    let output = run_ground(&passing, &document, &lock, false);
+    assert_eq!(output.status.code(), Some(0), "{}", report(&output));
+
+    let failing = claims_file(&dir, "thousands.jsonl", &[claim(1300, "thousands")]);
+    let output = run_ground(&failing, &document, &lock, false);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(report(&output).to_string().contains("E_SCALE_MISMATCH"));
+}
+
 #[test]
 fn lock_is_required_for_grounding() {
     let output = Command::new(env!("CARGO_BIN_EXE_verify"))

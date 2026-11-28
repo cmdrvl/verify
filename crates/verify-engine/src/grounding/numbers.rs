@@ -86,8 +86,12 @@ const PHRASES: [(&str, Currency); 17] = [
 ];
 
 /// Words after a number that change its magnitude in a way no claim scale can express.
-const UNSUPPORTED_SCALES: [&str; 51] = [
+const UNSUPPORTED_SCALES: [&str; 48] = [
     // Magnitude words in other languages.
+    "billones",
+    "billon",
+    "bill\u{f3}n",
+    "billionen",
     "millones",
     "millon",
     "millionen",
@@ -99,13 +103,6 @@ const UNSUPPORTED_SCALES: [&str; 51] = [
     "milh\u{f5}es",
     "tausend",
     "mille",
-    "billion",
-    "billions",
-    "bn",
-    "trillion",
-    "trillions",
-    "tn",
-    "trn",
     "quadrillion",
     "mm",
     "mn",
@@ -141,7 +138,9 @@ const UNSUPPORTED_SCALES: [&str; 51] = [
     "thousandths",
 ];
 
-const MAGNITUDES: [&str; 8] = [
+/// Every English magnitude word. One kept from the digits, or following another, still
+/// leaves a number unbound, whether or not a claim scale can express it.
+const MAGNITUDES: [&str; 12] = [
     "hundred",
     "thousand",
     "thousands",
@@ -149,11 +148,25 @@ const MAGNITUDES: [&str; 8] = [
     "millions",
     "billion",
     "billions",
+    "bn",
     "trillion",
+    "trillions",
+    "tn",
+    "trn",
 ];
 
 /// Short forms of a scale declaration; see also `declares_scale`.
-const SCALE_DECLARATIONS: [&str; 23] = [
+const SCALE_DECLARATIONS: [&str; 33] = [
+    "(\u{a3}bn)",
+    "(\u{20ac}bn)",
+    "($tn)",
+    "(\u{a3}tn)",
+    "(\u{20ac}tn)",
+    "in $bn",
+    "in \u{a3}bn",
+    "in \u{20ac}bn",
+    "in $tn",
+    "$ bn)",
     "'000",
     "\u{2019}000",
     "\u{a3}000",
@@ -198,36 +211,38 @@ fn declares_scale(text: &str) -> bool {
     {
         return true;
     }
-    ["thousand", "million", "billion"].iter().any(|magnitude| {
-        lower.match_indices(magnitude).any(|(start, _)| {
-            let mut end = start + magnitude.len();
-            let plural = lower[end..].starts_with('s');
-            end += usize::from(plural);
-            let before = text[..start].trim_end();
-            if lower[..start].chars().next_back().is_some_and(is_word)
-                || lower[end..].starts_with(is_word)
-                || before.ends_with(|last: char| last.is_ascii_digit() || last == '-')
-            {
-                return false;
-            }
-            let previous_word = before
-                .rsplit(|character: char| !character.is_alphabetic())
-                .next()
-                .unwrap_or("");
-            before.ends_with('(')
-                || before.ends_with(is_currency_symbol)
-                || code_currency(previous_word).is_some()
-                || (plural && previous_word.eq_ignore_ascii_case("in"))
-                || [
-                    " of dollars",
-                    " of u.s. dollars",
-                    " of us dollars",
-                    " of euros",
-                ]
-                .iter()
-                .any(|tail| lower[end..].starts_with(tail))
+    ["thousand", "million", "billion", "trillion"]
+        .iter()
+        .any(|magnitude| {
+            lower.match_indices(magnitude).any(|(start, _)| {
+                let mut end = start + magnitude.len();
+                let plural = lower[end..].starts_with('s');
+                end += usize::from(plural);
+                let before = text[..start].trim_end();
+                if lower[..start].chars().next_back().is_some_and(is_word)
+                    || lower[end..].starts_with(is_word)
+                    || before.ends_with(|last: char| last.is_ascii_digit() || last == '-')
+                {
+                    return false;
+                }
+                let previous_word = before
+                    .rsplit(|character: char| !character.is_alphabetic())
+                    .next()
+                    .unwrap_or("");
+                before.ends_with('(')
+                    || before.ends_with(is_currency_symbol)
+                    || code_currency(previous_word).is_some()
+                    || (plural && previous_word.eq_ignore_ascii_case("in"))
+                    || [
+                        " of dollars",
+                        " of u.s. dollars",
+                        " of us dollars",
+                        " of euros",
+                    ]
+                    .iter()
+                    .any(|tail| lower[end..].starts_with(tail))
+            })
         })
-    })
 }
 
 pub(super) fn is_combining(character: char) -> bool {
@@ -599,6 +614,11 @@ fn suffix(document: &Document<'_>, after: usize, has_currency: bool) -> (Suffix,
         }
         "thousand" | "thousands" => Suffix::Scale(Scale::Thousands),
         "million" | "millions" => Suffix::Scale(Scale::Millions),
+        "billion" | "billions" | "bn" => Suffix::Scale(Scale::Billions),
+        "trillion" | "trillions" | "trn" => Suffix::Scale(Scale::Trillions),
+        // `tn` is also tonnes: it means trillions only next to a currency.
+        "tn" if has_currency => Suffix::Scale(Scale::Trillions),
+        "tn" => Suffix::Unsupported,
         "bps" | "bp" => Suffix::Scale(Scale::Bps),
         "basis" if following == "point" || following == "points" => {
             end = following_end;
@@ -956,7 +976,23 @@ pub(super) fn tokens(text: &str, breaks: &[TagBreak]) -> Vec<NumberToken> {
             }
         }
     }
+    if uses_long_scale(text) {
+        for token in &mut found {
+            if matches!(token.value, Some((_, Scale::Billions | Scale::Trillions))) {
+                token.value = None;
+            }
+        }
+    }
     found
+}
+
+/// Whether the document also uses words of a long-scale language, where "billion" is a
+/// million millions: then English `billion` and `trillion` cannot be established.
+fn uses_long_scale(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["milliard", "billionen", "billones", "bill\u{f3}n"]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// Whether `text[start..end]` stands on its own: it cuts neither a word, a number nor a

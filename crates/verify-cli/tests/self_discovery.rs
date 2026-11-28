@@ -128,6 +128,19 @@ fn the_claims_schema_agrees_with_the_parser() {
         .filter_map(|scale| scale.as_str().map(str::to_owned))
         .collect();
     assert!(!scales.is_empty());
+    // bd-xas: the long spellings and bn, tn, trn; never a lone b or t.
+    for scale in [
+        "billions",
+        "billion",
+        "bn",
+        "trillions",
+        "trillion",
+        "tn",
+        "trn",
+    ] {
+        assert!(scales.iter().any(|listed| listed == scale), "{scale}");
+    }
+    assert!(!scales.iter().any(|listed| listed == "b" || listed == "t"));
     for scale in &scales {
         let mut claim = full.clone();
         claim["scale"] = Value::String(scale.clone());

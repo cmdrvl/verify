@@ -30,8 +30,9 @@ pub const AFTER_HELP: &str = r#"CLAIMS_JSONL holds one JSON object per line. Fie
   quote      required; text the document shows, as whole words and whole numbers
   byte_span  optional {"start":N,"end":M}: the half-open raw byte range holding the quote
   value      optional number; give it together with scale
-  scale      units, thousands, millions, percent or bps (also unit, thousand, k, million, m,
-             %, bp, basis_points; case does not matter)
+  scale      units, thousands, millions, billions, trillions, percent or bps (also unit,
+             thousand, k, million, m, billion, bn, trillion, tn, trn, %, bp, basis_points;
+             case does not matter; a lone b or t is not accepted)
   unit       optional, only with value and scale: for example USD, $, percent or bps. It
              passes only if the document states it on the number
 
