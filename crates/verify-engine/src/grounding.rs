@@ -3,9 +3,15 @@
 //! This module deliberately accepts documents in memory. Filesystem loading and
 //! CLI rendering stay outside the engine so the same checks remain wasm-clean.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
-use cmdrvl_core::hash::{self, Algorithm};
+use cmdrvl_core::{
+    hash::{self, Algorithm},
+    lock_matching::{Member, SelectError, Verdict, select},
+};
 use serde::Deserialize;
 use serde_json::{Number, Value, json};
 use verify_core::{
@@ -444,11 +450,23 @@ struct LockedMember {
     lock_name: String,
 }
 
+/// The typed input name as lock rule R1 reads it. On Windows `\` separates folders in a typed
+/// name, so it becomes `/`; elsewhere it is an ordinary character. Member paths are never
+/// converted. `verify run` and `verify ground` both match through this.
+pub fn typed_name_for_matching(typed: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        Cow::Owned(typed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(typed)
+    }
+}
+
 /// Verify each in-memory document against the same lock.v0 prefix semantics as
 /// the DuckDB batch path, without importing DuckDB into this crate.
 ///
-/// Member matching stays local on purpose (cmd-zjr): `cmdrvl_core::lockfile` refuses inputs
-/// this accepts, and its verdict does not say which lock vouched. Only hashing is shared.
+/// Which members vouch for a document is lock rule R1, from `cmdrvl_core::lock_matching`
+/// (bd-6nk): every candidate member must agree with its bytes. Reading locks, hashing,
+/// refusals and report fields stay here.
 pub fn verify_locks(
     lock_files: &[(String, Vec<u8>)],
     documents: &BTreeMap<String, GroundingDocument>,
@@ -482,7 +500,7 @@ pub fn verify_locks(
                 }));
             }
             members.push(LockedMember {
-                path: normalize_path(&member.path),
+                path: member.path,
                 expected_hash: bytes_hash,
                 lock_name: lock_name.clone(),
             });
@@ -492,41 +510,71 @@ pub fn verify_locks(
 
     let mut results = BTreeMap::new();
     for (name, document) in documents {
-        let normalized = normalize_path(&document.path);
-        let candidates = lock_candidates(&members, &normalized);
-        if candidates.is_empty() {
-            return Err(GroundingError::Lock(LockError::InputNotLocked {
-                source: document.path.clone(),
-                locks_checked: lock_names.clone(),
-            }));
-        }
-
-        let mut vouching_locks = Vec::new();
-        let mut observed_hashes = Vec::new();
-        let mut first_expected = None;
-        for member in candidates {
-            let observed = hash_bytes(&member.expected_hash, &document.bytes).ok_or_else(|| {
-                GroundingError::Lock(LockError::Invalid {
+        // `Member::lock` carries the member's place in `members`, not a lock number. R1 hands
+        // it back untouched, so reports use this function's own record.
+        let offered = members.iter().enumerate().map(|(place, member)| Member {
+            lock: place,
+            path: &member.path,
+            digest: &member.expected_hash,
+        });
+        let selection = match select(&typed_name_for_matching(&document.path), offered) {
+            Ok(selection) => selection,
+            Err(SelectError::NotListed | SelectError::SeveralPaths(_)) => {
+                return Err(GroundingError::Lock(LockError::InputNotLocked {
+                    source: document.path.clone(),
+                    locks_checked: lock_names.clone(),
+                }));
+            }
+            // Loading above already refused every digest R1 cannot use.
+            Err(SelectError::UnusableDigest(unusable)) => {
+                let member = &members[unusable.lock];
+                return Err(GroundingError::Lock(LockError::Invalid {
                     name: member.lock_name.clone(),
                     detail: format!("member {} has malformed digest", member.path),
-                })
-            })?;
-            first_expected.get_or_insert_with(|| member.expected_hash.clone());
-            if !observed_hashes.contains(&observed) {
-                observed_hashes.push(observed.clone());
+                }));
             }
-            if observed == member.expected_hash && !vouching_locks.contains(&member.lock_name) {
-                vouching_locks.push(member.lock_name.clone());
-            }
-        }
+        };
 
-        if vouching_locks.is_empty() {
-            return Err(GroundingError::Lock(LockError::InputDrift {
-                source: document.path.clone(),
-                expected_hash: first_expected.expect("candidate set is non-empty"),
-                observed_hashes,
-            }));
-        }
+        let observed: Vec<(Algorithm, String)> = selection
+            .algorithms()
+            .into_iter()
+            .map(|algorithm| (algorithm, hash::hash_bytes(algorithm, &document.bytes)))
+            .collect();
+        let judged: Vec<(Algorithm, &str)> = observed
+            .iter()
+            .map(|(algorithm, digest)| (*algorithm, digest.as_str()))
+            .collect();
+        let verdict = selection
+            .judge(&judged)
+            .expect("every algorithm the selection names was hashed");
+
+        let vouching_locks = match verdict {
+            Verdict::Verified { matched, .. } => {
+                let mut locks: Vec<String> = Vec::new();
+                for member in matched {
+                    let lock_name = &members[member.lock].lock_name;
+                    if !locks.contains(lock_name) {
+                        locks.push(lock_name.clone());
+                    }
+                }
+                locks
+            }
+            Verdict::Drift { differing, .. } => {
+                let mut observed_hashes = Vec::new();
+                for member in &selection.candidates {
+                    let digest = hash_bytes(member.digest, &document.bytes)
+                        .expect("a selected digest names a supported algorithm");
+                    if !observed_hashes.contains(&digest) {
+                        observed_hashes.push(digest);
+                    }
+                }
+                return Err(GroundingError::Lock(LockError::InputDrift {
+                    source: document.path.clone(),
+                    expected_hash: differing[0].digest.to_owned(),
+                    observed_hashes,
+                }));
+            }
+        };
         results.insert(
             name.clone(),
             InputVerification {
@@ -536,40 +584,6 @@ pub fn verify_locks(
         );
     }
     Ok(results)
-}
-
-fn lock_candidates<'a>(members: &'a [LockedMember], normalized: &str) -> Vec<&'a LockedMember> {
-    let exact: Vec<_> = members.iter().filter(|m| m.path == normalized).collect();
-    if !exact.is_empty() {
-        return exact;
-    }
-    let wanted = path_basename(normalized);
-    let candidates: Vec<_> = members
-        .iter()
-        .filter(|member| path_basename(&member.path) == wanted)
-        .collect();
-    let distinct_paths: BTreeSet<&str> = candidates
-        .iter()
-        .map(|member| member.path.as_str())
-        .collect();
-    if distinct_paths.len() == 1 {
-        candidates
-    } else {
-        Vec::new()
-    }
-}
-
-fn path_basename(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or("")
-}
-
-fn normalize_path(path: &str) -> String {
-    let trimmed = path.trim();
-    let stripped = trimmed.strip_prefix("./").unwrap_or(trimmed);
-    stripped
-        .trim_end_matches('/')
-        .trim_end_matches('\\')
-        .to_owned()
 }
 
 fn is_supported_hash(hash: &str) -> bool {

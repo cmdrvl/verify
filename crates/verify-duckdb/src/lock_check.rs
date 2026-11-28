@@ -1,20 +1,23 @@
 //! `--lock` checking for `verify run`.
 //!
-//! Member matching stays local on purpose (cmd-zjr): `cmdrvl_core::lockfile` refuses inputs
-//! this accepts, and its verdict does not say which lock vouched, which reports need. Only
-//! the choice of algorithm is shared. `verify-engine`'s `grounding` module has a second copy
-//! of the matching for `verify ground`, with two differences: it rejects a lock holding any
-//! unusable hash, and it has no empty-file-name guard.
+//! Which members vouch for an input is lock rule R1, from `cmdrvl_core::lock_matching`
+//! (bd-6nk): every candidate member must agree with the input. Reading locks, hashing, refusals
+//! and report fields stay here. `verify-engine`'s `grounding` module uses the same rule for
+//! `verify ground`; unlike this one, it rejects a lock holding any unusable hash.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, fs, path::PathBuf};
 
-use cmdrvl_core::hash::Algorithm;
+use cmdrvl_core::{
+    hash::{Algorithm, HEX_DIGITS},
+    lock_matching::{Member, SelectError, Verdict, select},
+};
 use serde::Deserialize;
 use serde_json::json;
 use verify_core::{
     refusal::{Refusal, RefusalCode},
     report::{InputVerification, InputVerificationStatus},
 };
+use verify_engine::grounding::typed_name_for_matching;
 
 use crate::BindingRegistry;
 
@@ -192,7 +195,7 @@ impl std::error::Error for LockError {}
 /// One locked member with the lock file it came from.
 #[derive(Debug, Clone)]
 struct LockedMember {
-    /// Normalized member path as written in the lock.
+    /// Member path exactly as written in the lock. Matching reads this one.
     path: String,
     /// `<algorithm>:<hex>` the lock expects (`bytes_hash`, or legacy `content_hash`).
     expected_hash: String,
@@ -208,39 +211,19 @@ struct LoadedLock {
     lock_names: Vec<String>,
 }
 
-impl LoadedLock {
-    /// Members that vouch for `normalized_path`: an exact path match wins, otherwise a
-    /// unique basename match (real `lock` output stores paths relative to the vacuum
-    /// root, so basename matching is the normal case). An ambiguous basename matches
-    /// nothing, because it cannot be verified safely. Same rule as shape, rvl, benchmark.
-    fn candidates(&self, normalized_path: &str) -> Vec<&LockedMember> {
-        let exact: Vec<&LockedMember> = self
-            .members
-            .iter()
-            .filter(|member| member.path == normalized_path)
-            .collect();
-        if !exact.is_empty() {
-            return exact;
-        }
-        let basename = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
-        let wanted = basename(normalized_path);
-        if wanted.is_empty() {
-            return Vec::new();
-        }
-        let by_basename: Vec<&LockedMember> = self
-            .members
-            .iter()
-            .filter(|member| basename(&member.path) == wanted)
-            .collect();
-        let distinct_paths: std::collections::BTreeSet<&str> = by_basename
-            .iter()
-            .map(|member| member.path.as_str())
-            .collect();
-        if distinct_paths.len() == 1 {
-            by_basename
-        } else {
-            Vec::new()
-        }
+/// The digest R1 is given for a recorded one. `verify run` reports a known algorithm with a
+/// bad digest as drift, not as a bad lock. R1 would refuse the digest outright, so it gets a
+/// well-formed one that cannot match: hashers print lowercase. An unknown algorithm is passed
+/// through and refused.
+fn digest_for_matching(recorded: &str) -> Cow<'_, str> {
+    let Some(algorithm) = Algorithm::of(recorded) else {
+        return Cow::Borrowed(recorded);
+    };
+    let digest = &recorded[algorithm.prefix().len() + 1..];
+    if digest.len() == HEX_DIGITS && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Cow::Borrowed(recorded)
+    } else {
+        Cow::Owned(format!("{}:{}", algorithm.prefix(), "F".repeat(HEX_DIGITS)))
     }
 }
 
@@ -258,62 +241,99 @@ pub fn verify_locks(
     }
 
     let loaded = load_locks(lock_paths)?;
+    let digests: Vec<Cow<'_, str>> = loaded
+        .members
+        .iter()
+        .map(|member| digest_for_matching(&member.expected_hash))
+        .collect();
     let mut verifications = BTreeMap::new();
 
     for (name, binding) in registry.iter() {
-        let source_path = normalize_path(&binding.source_path().to_string_lossy());
+        let typed = binding.source_path().to_string_lossy();
+        // Refusals have always reported this spelling. It is not what gets matched.
+        let source_path = reported_path(&typed);
         let content_hash = &binding.metadata().content_hash;
 
-        let candidates = loaded.candidates(&source_path);
-        if candidates.is_empty() {
-            return Err(LockError::InputNotLocked {
-                binding: name.to_owned(),
-                source_path,
-                locks_checked: loaded.lock_names.clone(),
-            });
-        }
-
-        let mut vouching_locks: Vec<String> = Vec::new();
-        let mut first_drift: Option<(String, String)> = None;
-        for member in candidates {
-            let Some(algorithm) = Algorithm::of(&member.expected_hash) else {
+        // `Member::lock` carries the member's place in `loaded.members`, not a lock number.
+        // R1 hands it back untouched, so reports and messages use this module's own record.
+        let members =
+            loaded
+                .members
+                .iter()
+                .zip(&digests)
+                .enumerate()
+                .map(|(place, (member, digest))| Member {
+                    lock: place,
+                    path: &member.path,
+                    digest,
+                });
+        let selection = match select(&typed_name_for_matching(&typed), members) {
+            Ok(selection) => selection,
+            Err(SelectError::NotListed | SelectError::SeveralPaths(_)) => {
+                return Err(LockError::InputNotLocked {
+                    binding: name.to_owned(),
+                    source_path,
+                    locks_checked: loaded.lock_names.clone(),
+                });
+            }
+            Err(SelectError::UnusableDigest(unusable)) => {
+                let member = &loaded.members[unusable.lock];
                 return Err(LockError::BadLock {
                     path: member.lock_path.clone(),
                     detail: format!(
                         "unsupported hash algorithm in '{}' for member {}; expected sha256: or blake3:",
-                        member.expected_hash, member.path
+                        member.expected_hash,
+                        reported_path(&member.path)
                     ),
                 });
-            };
-            // The binding already carries the sha256 of its bytes; anything else is
-            // computed from the same file the binding was loaded from.
-            let observed = if algorithm == Algorithm::Sha256 {
-                content_hash.clone()
-            } else {
-                digest_file(algorithm, binding.source_path()).map_err(|error| LockError::Io {
+            }
+        };
+
+        // The binding already carries the sha256 of its bytes. blake3 is computed, only if a
+        // candidate names it, from the file the binding was loaded from; the empty string
+        // left otherwise is never compared.
+        let blake3 = if selection.algorithms().contains(&Algorithm::Blake3) {
+            digest_file(Algorithm::Blake3, binding.source_path()).map_err(|error| {
+                LockError::Io {
                     path: binding.source_path().to_path_buf(),
                     detail: error.to_string(),
-                })?
-            };
-            if observed == member.expected_hash {
-                if !vouching_locks.contains(&member.lock_name) {
-                    vouching_locks.push(member.lock_name.clone());
                 }
-            } else if first_drift.is_none() {
-                first_drift = Some((member.expected_hash.clone(), observed));
-            }
-        }
+            })?
+        } else {
+            String::new()
+        };
+        let verdict = selection
+            .judge(&[
+                (Algorithm::Sha256, content_hash.as_str()),
+                (Algorithm::Blake3, blake3.as_str()),
+            ])
+            .expect("a digest is given for both algorithms");
 
-        if vouching_locks.is_empty() {
-            let (expected_hash, observed_hash) =
-                first_drift.expect("a non-empty candidate set that never matched drifted");
-            return Err(LockError::InputDrift {
-                binding: name.to_owned(),
-                source_path,
-                expected_hash,
-                observed_hash,
-            });
-        }
+        let vouching_locks = match verdict {
+            Verdict::Verified { matched, .. } => {
+                let mut locks: Vec<String> = Vec::new();
+                for member in matched {
+                    let lock_name = &loaded.members[member.lock].lock_name;
+                    if !locks.contains(lock_name) {
+                        locks.push(lock_name.clone());
+                    }
+                }
+                locks
+            }
+            Verdict::Drift { differing, .. } => {
+                let expected_hash = loaded.members[differing[0].lock].expected_hash.clone();
+                let observed_hash = match Algorithm::of(&expected_hash) {
+                    Some(Algorithm::Blake3) => blake3,
+                    _ => content_hash.clone(),
+                };
+                return Err(LockError::InputDrift {
+                    binding: name.to_owned(),
+                    source_path,
+                    expected_hash,
+                    observed_hash,
+                });
+            }
+        };
         verifications.insert(
             name.to_owned(),
             InputVerification {
@@ -377,7 +397,7 @@ fn load_locks(paths: &[PathBuf]) -> Result<LoadedLock, LockError> {
                 });
             };
             members.push(LockedMember {
-                path: normalize_path(&member.path),
+                path: member.path,
                 expected_hash,
                 lock_name: lock_name.clone(),
                 lock_path: path.clone(),
@@ -393,12 +413,9 @@ fn load_locks(paths: &[PathBuf]) -> Result<LoadedLock, LockError> {
     })
 }
 
-/// Normalize a path string for lock membership matching.
-///
-/// Lock files use relative paths (e.g. `fixtures/inputs/arity1/loans.csv`).
-/// Binding source paths may be absolute or relative. This normalization strips
-/// leading `./` and trailing separators to increase matching likelihood.
-fn normalize_path(path: &str) -> String {
+/// The spelling `verify run` has always given a path in refusals: trimmed, one leading `./`
+/// removed, trailing separators dropped. Only for messages; matching is R1's.
+fn reported_path(path: &str) -> String {
     let trimmed = path.trim();
     let stripped = trimmed.strip_prefix("./").unwrap_or(trimmed);
     stripped
@@ -418,7 +435,7 @@ mod tests {
 
     use verify_core::report::InputVerificationStatus;
 
-    use super::{LockError, normalize_path, verify_locks};
+    use super::{LockError, reported_path, verify_locks};
     use crate::{
         BatchBindingInput, BatchBindingLimits, BindingRegistry, bindings::load_binding_registry,
     };
@@ -651,10 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_path_strips_dot_slash_prefix() {
-        assert_eq!(normalize_path("./fixtures/input.csv"), "fixtures/input.csv");
-        assert_eq!(normalize_path("fixtures/input.csv"), "fixtures/input.csv");
-        assert_eq!(normalize_path("/abs/path/input.csv"), "/abs/path/input.csv");
+    fn reported_path_strips_dot_slash_prefix() {
+        assert_eq!(reported_path("./fixtures/input.csv"), "fixtures/input.csv");
+        assert_eq!(reported_path("fixtures/input.csv"), "fixtures/input.csv");
+        assert_eq!(reported_path("/abs/path/input.csv"), "/abs/path/input.csv");
     }
 
     #[test]

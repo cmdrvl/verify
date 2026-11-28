@@ -48,6 +48,10 @@ name = "perf_smoke"
 path = "../../tests/perf_smoke.rs"
 
 [[test]]
+name = "lock_matching"
+path = "../../tests/lock_matching.rs"
+
+[[test]]
 name = "released_parity"
 path = "../../tests/released_parity.rs"
 

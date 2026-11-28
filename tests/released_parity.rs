@@ -6,10 +6,24 @@
 //! the hashes a report carries, ordinal and keyed redaction in JSON and human output, the
 //! redaction-key refusals and witness ledger lines.
 //!
-//! Some recorded results are weaknesses that are pinned as they are, not endorsed: for example,
-//! two locks listing one member path accept either hash (bd-6nk). A deliberate behaviour change
-//! must change the affected cases in the same commit and say why. Do not record from the code
-//! under test.
+//! Some recorded results are weaknesses that are pinned as they are, not endorsed. A deliberate
+//! behaviour change must change the affected cases in the same commit and say why. Do not record
+//! from the code under test.
+//!
+//! Fifteen cases are NOT observations of 0.7.6. They changed with lock rule R1 (bd-6nk), which
+//! replaced only input-to-lock matching. Each new result was written by hand from the rule and the
+//! case's own inputs, in a refusal format 0.7.6 did print (the cases "run two periods,
+//! same-path, neither", "run lock: duplicate path both bad", "run lock: not locked" and "ground
+//! two periods, same-path, neither"):
+//!
+//! * "run two periods, same-path" and "ground two periods, same-path": correct, exchanged and
+//!   both "-both" cases, eight in all. 0.7.6 passed an input that matched either lock. Both
+//!   members are now candidates and every candidate must agree, so each placement is drift.
+//! * "run lock:" repeated entry with different digests, repeated entry by file name, dot-slash
+//!   member beside plain, and duplicate path bad then good. One matching candidate used to be
+//!   enough; now the other one is drift.
+//! * "run lock:" backslash member, spaced member and trailing slash member. Member paths are no
+//!   longer rewritten, and `\` is part of a name, so these inputs are not locked.
 //!
 //! In witness lines `id`, `binary_hash`, `ts` and the tool version vary, so they are masked.
 //! The `id` is checked separately: it is FNV-1a 64 of the line with the `id` left empty.

@@ -551,7 +551,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "cmdrvl-core"
 version = "0.1.0"
-source = "git+https://github.com/cmdrvl/core?rev=a3dad0b1af2eeb8036625b25f3d9ff94c3a1ef0e#a3dad0b1af2eeb8036625b25f3d9ff94c3a1ef0e"
+source = "git+https://github.com/cmdrvl/core?rev=9cdf14a55f33fd8f426cbeb54fca478885239e7c#9cdf14a55f33fd8f426cbeb54fca478885239e7c"
 dependencies = [
  "blake3",
  "hmac",
