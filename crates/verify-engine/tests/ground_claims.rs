@@ -1824,3 +1824,219 @@ fn quotes_around_whole_currency_markers_still_pass() {
     ]);
     assert_all_pass(&cases);
 }
+
+// ---- bd-22j: a prefix written apart from its `$` ------------------------------------------
+
+/// The prefixes in scope, each with the currency code it points to.
+const SPACED: [(&str, &str); 7] = [
+    ("US", "USD"),
+    ("U.S.", "USD"),
+    ("CA", "CAD"),
+    ("Cdn", "CAD"),
+    ("HK", "HKD"),
+    ("NZ", "NZD"),
+    ("AU", "AUD"),
+];
+
+fn leak(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// The ways a document can put space between `prefix` and `$41.2 million`: the layout's name,
+/// the document, and the bytes of it that hold only the amount.
+fn layouts(prefix: &str) -> Vec<(&'static str, &'static str, &'static str)> {
+    let plain = "$41.2 million";
+    [
+        (
+            "space",
+            format!("Cash totaled {prefix} $41.2 million."),
+            plain,
+        ),
+        (
+            "line break",
+            format!("Cash totaled {prefix}\n$41.2 million."),
+            plain,
+        ),
+        (
+            "nbsp entity",
+            format!("<p>Cash totaled {prefix}&nbsp;$41.2 million.</p>"),
+            plain,
+        ),
+        (
+            "numeric entities",
+            format!("<p>Cash totaled {prefix}&#160;&#36;41.2 million.</p>"),
+            "&#36;41.2 million",
+        ),
+        (
+            "inline tag",
+            format!("Cash totaled <b>{prefix}</b> $41.2 million."),
+            plain,
+        ),
+        (
+            "br",
+            format!("Cash totaled {prefix}<br>$41.2 million."),
+            plain,
+        ),
+        (
+            "table cells",
+            format!("<tr><td>Cash totaled {prefix}</td><td>$41.2 million</td></tr>"),
+            plain,
+        ),
+    ]
+    .into_iter()
+    .map(|(layout, document, amount)| {
+        let name = leak(format!("{prefix}, {layout}"));
+        (name, leak(document), amount)
+    })
+    .collect()
+}
+
+#[test]
+fn a_quote_may_not_cut_a_spaced_currency_prefix() {
+    let mut cases = Vec::new();
+    for (prefix, _) in SPACED {
+        for (name, document, amount) in layouts(prefix) {
+            let cut = "$41.2 million";
+            cases.push(case(name, document, cut, None));
+            cases.push(case(name, document, cut, n("41.2", "millions")));
+            cases.push(case(name, document, cut, u("41.2", "millions", "$")));
+            cases.push(case(name, document, cut, u("41.2", "millions", "USD")));
+            cases.push(spanned(name, document, cut, None, amount));
+        }
+        let document = leak(format!("Cash totaled {prefix} $41.2 million."));
+        let inside = leak(format!("Cash totaled {prefix}"));
+        cases.push(case(inside, document, inside, None));
+    }
+    cases.push(case(
+        "ends inside U.S. before its last dot",
+        "Cash totaled U.S. $41.2 million.",
+        "Cash totaled U.S",
+        None,
+    ));
+    // A sentence that ends "U.S." cannot be told apart from the prefix, so it is refused too.
+    cases.push(case(
+        "a sentence that ends U.S. before an amount",
+        "It is sold in the U.S. $5 million was spent.",
+        "$5 million was spent",
+        None,
+    ));
+    assert_none_pass(&cases);
+}
+
+#[test]
+fn a_spaced_prefix_establishes_no_unit_by_itself() {
+    let mut cases = Vec::new();
+    for (prefix, code) in SPACED {
+        for (name, document, _) in layouts(prefix) {
+            let whole = leak(format!("{prefix} $41.2 million"));
+            // Not a bare dollar, because the prefix says which; not established as that
+            // currency either, because the words in front of a `$` may be prose.
+            cases.push(case(name, document, whole, u("41.2", "millions", "$")));
+            cases.push(case(name, document, whole, u("41.2", "millions", "USD")));
+            cases.push(case(name, document, whole, u("41.2", "millions", code)));
+        }
+    }
+    cases.extend([
+        case(
+            "CA prefix, USD code after",
+            "Cash totaled CA $41.2 million USD.",
+            "CA $41.2 million USD",
+            u("41.2", "millions", "USD"),
+        ),
+        case(
+            "US prefix, CAD code after",
+            "Cash totaled US $41.2 million CAD.",
+            "US $41.2 million CAD",
+            u("41.2", "millions", "CAD"),
+        ),
+        case(
+            "HK prefix, code before says USD",
+            "Cash totaled USD HK $41.2 million.",
+            "USD HK $41.2 million",
+            u("41.2", "millions", "USD"),
+        ),
+        case(
+            "prefix left out of the quote, unit $",
+            "Cash totaled US $41.2 million.",
+            "41.2 million",
+            u("41.2", "millions", "$"),
+        ),
+    ]);
+    assert_none_pass(&cases);
+}
+
+#[test]
+fn quotes_that_hold_a_spaced_prefix_still_pass() {
+    let mut cases = Vec::new();
+    for (prefix, code) in SPACED {
+        for (name, document, _) in layouts(prefix) {
+            let whole = leak(format!("{prefix} $41.2 million"));
+            cases.push(case(name, document, whole, None));
+            cases.push(case(name, document, whole, n("41.2", "millions")));
+            // Starting after the whole marker keeps the rule it had.
+            cases.push(case(name, document, "41.2 million", n("41.2", "millions")));
+        }
+        let document = leak(format!("Cash totaled {prefix} $41.2 million."));
+        let before = leak(format!("totaled {prefix} $41.2 million"));
+        cases.push(case(before, document, before, n("41.2", "millions")));
+        cases.push(spanned(
+            before,
+            document,
+            before,
+            n("41.2", "millions"),
+            before,
+        ));
+        // A code that agrees with the prefix still establishes the unit.
+        let coded = leak(format!("Cash totaled {prefix} $41.2 million {code}."));
+        let quote = leak(format!("{prefix} $41.2 million {code}"));
+        cases.push(case(quote, coded, quote, u("41.2", "millions", code)));
+    }
+    cases.push(case(
+        "attached US$ keeps establishing USD",
+        "Cash totaled US$41.2 million.",
+        "US$41.2 million",
+        u("41.2", "millions", "USD"),
+    ));
+    assert_all_pass(&cases);
+}
+
+/// Ordinary text in front of a `$`: none of it may become part of a marker.
+#[test]
+fn ordinary_words_before_a_dollar_sign_are_not_markers() {
+    let rows = [
+        // The pronoun: only the capitals `US` are a prefix.
+        ("They told us $5 million was lost.", "$5 million was lost"),
+        ("They told Us $5 million was lost.", "$5 million was lost"),
+        // A sentence ending "US." has a dot the prefix `US` never has.
+        (
+            "Sales rose in the US. $5 million came later.",
+            "$5 million came later",
+        ),
+        // "ca." is circa; "Ca." and "CA." end a sentence or abbreviate.
+        ("It cost ca. $5 million then.", "$5 million then"),
+        ("It cost Ca. $5 million then.", "$5 million then"),
+        (
+            "We moved to CA. $5 million followed.",
+            "$5 million followed",
+        ),
+        // Lower-case look-alikes are other words (a content network, French "au").
+        ("The cdn $5 million budget grew.", "$5 million budget"),
+        ("Paid au $5 million rate.", "$5 million rate"),
+        // The prefix must be a whole word.
+        ("A PLUS $5 million bonus.", "$5 million bonus"),
+        ("The BUS $5 million fleet.", "$5 million fleet"),
+        ("The EU $5 million grant.", "$5 million grant"),
+        // Single letters are an open operator choice and are left alone.
+        ("Class A $5 million notes.", "$5 million notes"),
+        // Punctuation between the word and the sign breaks the marker.
+        ("They told US, $5 million was lost.", "$5 million was lost"),
+        ("Offices in HK: $5 million each.", "$5 million each"),
+    ];
+    let mut cases = Vec::new();
+    for (document, quote) in rows {
+        cases.push(case(document, document, quote, None));
+        cases.push(case(document, document, quote, n("5", "millions")));
+        cases.push(case(document, document, quote, u("5", "millions", "$")));
+    }
+    assert_all_pass(&cases);
+}
