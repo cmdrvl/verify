@@ -60,15 +60,59 @@ pub fn compile_from_path(path: &Path) -> Result<ConstraintSet, CompileError> {
 }
 
 pub fn compile_source(source: &str) -> Result<ConstraintSet, CompileError> {
-    let authoring: PortableAuthoring =
-        serde_yaml::from_str(source).map_err(|error| CompileError::BadAuthoring {
-            message: format!("portable authoring could not be parsed: {error}"),
-            detail: json!({
-                "status": "parse_error",
-            }),
-        })?;
+    let authoring: PortableAuthoring = serde_yaml::from_str(source).map_err(parse_error)?;
+    let compiled = authoring.compile()?;
+    reject_non_finite_numbers(source)?;
+    Ok(compiled)
+}
 
-    authoring.compile()
+fn parse_error(error: serde_yaml::Error) -> CompileError {
+    CompileError::BadAuthoring {
+        message: format!("portable authoring could not be parsed: {error}"),
+        detail: json!({
+            "status": "parse_error",
+        }),
+    }
+}
+
+/// A rule literal is held as a JSON value, which has no NaN or infinity: reading one yields
+/// null, and a null row satisfies `eq` and `in` against it. The YAML document is therefore
+/// read again, as YAML, and a non-finite number anywhere in it is refused.
+fn reject_non_finite_numbers(source: &str) -> Result<(), CompileError> {
+    let document: serde_yaml::Value = serde_yaml::from_str(source).map_err(parse_error)?;
+    match non_finite_number_path(&document) {
+        None => Ok(()),
+        Some(path) => {
+            let path = path.trim_start_matches('.');
+            Err(bad_authoring(
+                &format!("{path}: .nan and .inf are not numbers a rule can compare with"),
+                json!({"reason": "non_finite_number", "path": path}),
+            ))
+        }
+    }
+}
+
+/// Where the first non-finite number sits, such as `rules[0].expr.in[1][0]`.
+fn non_finite_number_path(value: &serde_yaml::Value) -> Option<String> {
+    use serde_yaml::Value as Yaml;
+
+    match value {
+        Yaml::Number(number) => number
+            .as_f64()
+            .is_some_and(|number| !number.is_finite())
+            .then(String::new),
+        Yaml::Sequence(items) => items.iter().enumerate().find_map(|(index, item)| {
+            non_finite_number_path(item).map(|rest| format!("[{index}]{rest}"))
+        }),
+        Yaml::Mapping(entries) => entries.iter().find_map(|(key, item)| {
+            let name = key.as_str().unwrap_or("?");
+            non_finite_number_path(key)
+                .or_else(|| non_finite_number_path(item))
+                .map(|rest| format!(".{name}{rest}"))
+        }),
+        Yaml::Tagged(tagged) => non_finite_number_path(&tagged.value),
+        Yaml::Null | Yaml::Bool(_) | Yaml::String(_) => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -878,6 +922,17 @@ rules:
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_refused_non_finite_literal_is_located() -> Result<(), String> {
+        let detail = bad_authoring_detail(
+            "constraint_set_id: located\nbindings:\n  input: {}\nrules:\n  - id: LITERAL\n    severity: error\n    binding: input\n    op: predicate\n    expr: { in: [ { column: v }, [ 5, .inf ] ] }\n",
+            "a non-finite literal should be rejected",
+        )?;
+        assert_eq!(detail["reason"], "non_finite_number");
+        assert_eq!(detail["path"], "rules[0].expr.in[1][1]");
+        Ok(())
     }
 
     #[test]
