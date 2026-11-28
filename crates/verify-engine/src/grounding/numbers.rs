@@ -601,6 +601,9 @@ fn suffix(document: &Document<'_>, after: usize, has_currency: bool) -> (Suffix,
     if attached && code_currency(&word).is_some() {
         return (Suffix::None, after);
     }
+    // Only the refusal list is matched with every letter's case folded (`MILLÓN`). Folding
+    // the word the accepted scales are read from would also read a Kelvin sign as `k`.
+    let folded = word.to_lowercase();
     let word = word.to_ascii_lowercase();
     let next = document.skip_space(end);
     let (following, following_end) = document.word_at(next);
@@ -636,7 +639,7 @@ fn suffix(document: &Document<'_>, after: usize, has_currency: bool) -> (Suffix,
         "k" if has_currency && !hyphenated => Suffix::Scale(Scale::Thousands),
         "m" | "b" | "t" if has_currency && !hyphenated => Suffix::Unsupported,
         "k" | "m" | "b" if !attached && !hyphenated => Suffix::Unsupported,
-        other if UNSUPPORTED_SCALES.contains(&other) => Suffix::Unsupported,
+        _ if UNSUPPORTED_SCALES.contains(&folded.as_str()) => Suffix::Unsupported,
         _ if attached || hyphenated => return (Suffix::Identifier, after),
         _ => return (Suffix::None, after),
     };

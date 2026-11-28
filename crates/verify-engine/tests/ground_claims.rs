@@ -2496,6 +2496,73 @@ fn a_singular_magnitude_word_does_not_leave_its_number_bound() {
     ]);
 }
 
+/// Accented scale words count in any letter case (bd-cq8).
+#[test]
+fn an_accented_scale_word_in_capitals_does_not_leave_its_number_bound() {
+    assert_none_pass(&[
+        case(
+            "MILL\u{d3}N",
+            "VALOR: 5 MILL\u{d3}N",
+            "5 MILL\u{d3}N",
+            n("5", "units"),
+        ),
+        case(
+            "MILH\u{c3}O",
+            "O valor foi 5 MILH\u{c3}O.",
+            "5 MILH\u{c3}O",
+            n("5", "units"),
+        ),
+        case(
+            "BILL\u{d3}N",
+            "VALOR: 5 BILL\u{d3}N",
+            "5 BILL\u{d3}N",
+            n("5", "units"),
+        ),
+        case(
+            "MILH\u{d5}ES",
+            "O valor foi 5 MILH\u{d5}ES.",
+            "5 MILH\u{d5}ES",
+            n("5", "units"),
+        ),
+        case(
+            "mixed case",
+            "Fueron 5 Mill\u{d3}n.",
+            "5 Mill\u{d3}n",
+            n("5", "units"),
+        ),
+        case(
+            "with a currency",
+            "EUR 5 MILL\u{d3}N",
+            "EUR 5 MILL\u{d3}N",
+            u("5", "units", "EUR"),
+        ),
+        case(
+            "left out of the quote",
+            "VALOR EUR 5 MILL\u{d3}N",
+            "EUR 5",
+            n("5", "units"),
+        ),
+        case(
+            "joined by a hyphen",
+            "UN FONDO DE 5-MILH\u{d5}ES.",
+            "DE 5",
+            n("5", "units"),
+        ),
+    ]);
+}
+
+/// Folding every letter's case would read the Kelvin sign as `k`, so only the refusal list
+/// is matched that way.
+#[test]
+fn a_kelvin_sign_is_not_read_as_thousands() {
+    assert_none_pass(&[case(
+        "Kelvin sign after a currency amount",
+        "It cost $5\u{212a} today.",
+        "$5\u{212a}",
+        n("5", "thousands"),
+    )]);
+}
+
 #[test]
 fn capitalized_billion_is_the_english_short_scale() {
     assert_all_pass(&[
